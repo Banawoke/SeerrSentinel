@@ -301,25 +301,56 @@ def get_radarr_missing_movies(api_key, base_url):
 
 def get_sonarr_missing_episodes(api_key, base_url):
     all_series = get_all_sonarr_series_with_status(api_key, base_url)
-    missing_series = {}
+    missing_items = {}
     for tmdb_id, series in all_series.items():
         if tmdb_id is None:
             continue
-        episode_file_count = series.get("statistics", {}).get("episodeFileCount", 0)
-        episode_count = series.get("statistics", {}).get("episodeCount", 0)
         
-        if episode_file_count < episode_count:
-            next_air_date = get_sonarr_next_airing(series)
-            if not is_release_due(next_air_date, RELEASE_BUFFER_DAYS):
-                continue
-            
-            previous_airing = series.get("previousAiring")
-            if previous_airing and not is_release_due(previous_airing, RELEASE_BUFFER_DAYS):
-                continue
+        # Check series-level safeguards first
+        next_air_date = get_sonarr_next_airing(series)
+        if not is_release_due(next_air_date, RELEASE_BUFFER_DAYS):
+            continue
+        
+        previous_airing = series.get("previousAiring")
+        if previous_airing and not is_release_due(previous_airing, RELEASE_BUFFER_DAYS):
+            continue
 
-            title = series.get("title") or get_tmdb_title(tmdb_id, TMDB_API_KEY, media_type="tv")
-            missing_series[tmdb_id] = title or f"TMDB {tmdb_id}"
-    return missing_series
+        # Now check seasons
+        seasons = series.get("seasons", [])
+        monitored_seasons_count = 0
+        problematic_seasons = []
+        
+        for season in seasons:
+            if not season.get("monitored"):
+                continue
+            monitored_seasons_count += 1
+            
+            stats = season.get("statistics", {})
+            file_count = stats.get("episodeFileCount", 0)
+            total_count = stats.get("episodeCount", 0)
+            
+            if file_count < total_count:
+                problematic_seasons.append(season.get("seasonNumber"))
+        
+        if not problematic_seasons:
+            continue
+            
+        title = series.get("title") or get_tmdb_title(tmdb_id, TMDB_API_KEY, media_type="tv")
+        
+        if len(problematic_seasons) == monitored_seasons_count:
+             action = "delete_series"
+        else:
+             action = "unmonitor_seasons"
+             
+        missing_items[tmdb_id] = {
+            "title": title or f"TMDB {tmdb_id}",
+            "tmdb_id": tmdb_id,
+            "series_id": series.get("id"),
+            "action": action,
+            "seasons": problematic_seasons
+        }
+            
+    return missing_items
 
 def delete_radarr_movie(api_key, base_url, tmdb_id):
     headers = {"X-Api-Key": api_key}
@@ -341,6 +372,30 @@ def delete_radarr_movie(api_key, base_url, tmdb_id):
     delete_response = requests.delete(delete_url, headers=headers, params=params)
     delete_response.raise_for_status()
     print(f"Successfully deleted movie with TMDB ID {tmdb_id} from Radarr.")
+
+def unmonitor_sonarr_seasons(api_key, base_url, series_id, seasons_to_unmonitor):
+    headers = {"X-Api-Key": api_key, "Content-Type": "application/json"}
+    
+    # Get series first to have current state
+    get_url = f"{base_url}/api/v3/series/{series_id}"
+    resp = requests.get(get_url, headers=headers)
+    resp.raise_for_status()
+    series_data = resp.json()
+    
+    updated = False
+    for season in series_data.get("seasons", []):
+        if season["seasonNumber"] in seasons_to_unmonitor:
+            if season["monitored"]:
+                season["monitored"] = False
+                updated = True
+    
+    if updated:
+        put_url = f"{base_url}/api/v3/series/{series_id}"
+        resp = requests.put(put_url, headers=headers, json=series_data)
+        resp.raise_for_status()
+        print(f"Unmonitored seasons {seasons_to_unmonitor} for series {series_data.get('title')}")
+    else:
+        print(f"Seasons {seasons_to_unmonitor} were already unmonitored for {series_data.get('title')}")
 
 def delete_sonarr_series(api_key, base_url, tmdb_id):
     headers = {"X-Api-Key": api_key, "Content-Type": "application/json"}
@@ -444,9 +499,22 @@ def perform_deletions(radarr_api_key, radarr_url, sonarr_api_key, sonarr_url):
         print("Nothing to delete from Radarr.")
 
     if data_to_delete["sonarr"]:
-        print(f"Deleting series from Sonarr: {data_to_delete['sonarr']}")
-        for tmdb_id in data_to_delete["sonarr"]:
-            delete_sonarr_series(sonarr_api_key, sonarr_url, tmdb_id)
+        print(f"Processing series in Sonarr: {data_to_delete['sonarr']}")
+        for item in data_to_delete["sonarr"]:
+            # Handle both old format (ID only) and new format (dict) for backward compat slightly, though new file structure overrides
+            if isinstance(item, dict):
+                tmdb_id = item["tmdb_id"]
+                action = item.get("action", "delete_series")
+                if action == "delete_series":
+                    delete_sonarr_series(sonarr_api_key, sonarr_url, tmdb_id)
+                elif action == "unmonitor_seasons":
+                    series_id = item.get("series_id")
+                    seasons = item.get("seasons", [])
+                    if series_id and seasons:
+                        unmonitor_sonarr_seasons(sonarr_api_key, sonarr_url, series_id, seasons)
+            else:
+                 # Fallback for simple ID list
+                 delete_sonarr_series(sonarr_api_key, sonarr_url, item)
     else:
         print("Nothing to delete from Sonarr.")
 
@@ -524,9 +592,11 @@ def generate_missing_media_report(dry_run=False):
         print("\nNo Radarr movies considered missing.")
 
     if sonarr_missing:
-        print("Sonarr series to be considered missing:")
-        for tmdb_id, title in sonarr_missing.items():
-            print(f"- {title} (TMDB ID: {tmdb_id})")
+        print("Sonarr series to be considered missing/incomplete:")
+        for tmdb_id, info in sonarr_missing.items():
+            action = info['action']
+            seasons = info['seasons']
+            print(f"- {info['title']} (TMDB ID: {tmdb_id}) -> Action: {action}, Seasons: {seasons}")
     else:
         print("No Sonarr series considered missing.")
 
@@ -589,11 +659,13 @@ def generate_missing_media_report(dry_run=False):
         (now - datetime.fromisoformat(updated_pending[str(tmdb_id)]["first_seen"])).days >= DELETION_DELAY_DAYS
     ]
     
-    sonarr_ready = [
-        tmdb_id for tmdb_id in sonarr_missing
-        if str(tmdb_id) in updated_pending and
-        (now - datetime.fromisoformat(updated_pending[str(tmdb_id)]["first_seen"])).days >= DELETION_DELAY_DAYS
-    ]
+    sonarr_ready = []
+    for tmdb_id_str, entry in updated_pending.items():
+        tmdb_id = int(tmdb_id_str)
+        if tmdb_id in sonarr_missing:
+            # Check grace period
+             if (now - datetime.fromisoformat(entry["first_seen"])).days >= DELETION_DELAY_DAYS:
+                 sonarr_ready.append(sonarr_missing[tmdb_id])
 
     temp_data = {
         "radarr": radarr_ready,
