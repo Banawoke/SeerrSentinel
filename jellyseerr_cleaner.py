@@ -37,7 +37,7 @@ TARGET_TMDB_IDS = []
 TMDB_TITLE_CACHE = {}
 RELEASE_BUFFER_DAYS = int(os.environ.get("RELEASE_BUFFER_DAYS", "7"))
 DELETION_DELAY_DAYS = int(os.environ.get("DELETION_DELAY_DAYS", "2"))
-TEMP_FILE = "/tmp/jellyseerr_deletions.json"
+
 PENDING_FILE = "/tmp/jellyseerr_pending_deletions.json"
 
 
@@ -129,15 +129,7 @@ def friendly_sonarr_title(series):
         return f"TMDB {tmdb_id}"
     return "Unknown Sonarr Series"
 
-def write_to_temp_file(data):
-    with open(TEMP_FILE, "w") as f:
-        json.dump(data, f, indent=4)
 
-def read_from_temp_file():
-    if os.path.exists(TEMP_FILE):
-        with open(TEMP_FILE, "r") as f:
-            return json.load(f)
-    return {"radarr": [], "sonarr": [], "jellyseerr": []}
 
 
 def load_pending_deletions():
@@ -198,6 +190,12 @@ def fetch_jellyseerr_requests(api_key, base_url):
             media_type = normalize_media_type(media.get("mediaType"))
             title = media.get("title") or media.get("name")
             media_id = media.get("id")
+            
+            # Extract new fields
+            created_at = item.get("createdAt")
+            requested_by = item.get("requestedBy", {})
+            requester = requested_by.get("displayName") or requested_by.get("email") or requested_by.get("username") or "Unknown"
+
             if not title and tmdb_id:
                 try:
                     title = get_tmdb_title(tmdb_id, TMDB_API_KEY, media_type=media_type)
@@ -210,6 +208,8 @@ def fetch_jellyseerr_requests(api_key, base_url):
                     "media_id": media_id,
                     "tmdb_id": tmdb_id,
                     "media_type": media_type,
+                    "request_date": created_at,
+                    "requested_by": requester,
                 }
             )
 
@@ -488,20 +488,17 @@ def get_jellyseerr_library_media(api_key, base_url):
         library_media[tmdb_id] = title or f"TMDB {tmdb_id}"
     return library_media
 
-def perform_deletions(radarr_api_key, radarr_url, sonarr_api_key, sonarr_url):
-    data_to_delete = read_from_temp_file()
-
-    if data_to_delete["radarr"]:
-        print(f"Deleting movies from Radarr: {data_to_delete['radarr']}")
-        for tmdb_id in data_to_delete["radarr"]:
+def perform_deletions_list(radarr_api_key, radarr_url, sonarr_api_key, sonarr_url, deletion_data):
+    if deletion_data["radarr"]:
+        print(f"Deleting movies from Radarr: {deletion_data['radarr']}")
+        for tmdb_id in deletion_data["radarr"]:
             delete_radarr_movie(radarr_api_key, radarr_url, tmdb_id)
     else:
         print("Nothing to delete from Radarr.")
 
-    if data_to_delete["sonarr"]:
-        print(f"Processing series in Sonarr: {data_to_delete['sonarr']}")
-        for item in data_to_delete["sonarr"]:
-            # Handle both old format (ID only) and new format (dict) for backward compat slightly, though new file structure overrides
+    if deletion_data["sonarr"]:
+        print(f"Processing series in Sonarr: {deletion_data['sonarr']}")
+        for item in deletion_data["sonarr"]:
             if isinstance(item, dict):
                 tmdb_id = item["tmdb_id"]
                 action = item.get("action", "delete_series")
@@ -513,33 +510,22 @@ def perform_deletions(radarr_api_key, radarr_url, sonarr_api_key, sonarr_url):
                     if series_id and seasons:
                         unmonitor_sonarr_seasons(sonarr_api_key, sonarr_url, series_id, seasons)
             else:
-                 # Fallback for simple ID list
                  delete_sonarr_series(sonarr_api_key, sonarr_url, item)
     else:
         print("Nothing to delete from Sonarr.")
 
-    jellyseerr_requests_to_delete = data_to_delete.get("jellyseerr", []) or []
+    jellyseerr_requests_to_delete = deletion_data.get("jellyseerr", []) or []
     if jellyseerr_requests_to_delete:
         print("Deleting requested media from Jellyseerr:")
+        requests_to_clean = []
         for request in jellyseerr_requests_to_delete:
-            if isinstance(request, dict):
-                title = request.get("title") or f"TMDB {request.get('tmdb_id')}"
-            else:
-                title = f"TMDB {request}"
-            media_id = request.get("media_id") if isinstance(request, dict) else None
-            tmdb_id = request.get("tmdb_id") if isinstance(request, dict) else request
-            print(f"- {title} (ID: {media_id}, TMDB ID: {tmdb_id})")
-        jellyseerr_requests_to_delete = resolve_jellyseerr_delete_requests(
-            jellyseerr_requests_to_delete, JELLYSEER_API_KEY, JELLYSEER_URL
-        )
-        delete_jellyseerr_requests(JELLYSEER_API_KEY, JELLYSEER_URL, jellyseerr_requests_to_delete)
+            requests_to_clean.append(request)
+            
+        # Previously we did a resolution step here, but now we pass full request objects
+        # We can just call delete_jellyseerr_requests directly if we passed the right structure
+        delete_jellyseerr_requests(JELLYSEER_API_KEY, JELLYSEER_URL, requests_to_clean)
     else:
         print("Nothing to delete from Jellyseerr.")
-
-    # Clear the temp file after deletions
-    if os.path.exists(TEMP_FILE):
-        os.remove(TEMP_FILE)
-        print("Temp file cleared after deletions.")
 
 
 def generate_missing_media_report(dry_run=False):
@@ -601,99 +587,86 @@ def generate_missing_media_report(dry_run=False):
         print("No Sonarr series considered missing.")
 
     # Identify all current candidates for deletion
+    # Candidates are items missing in Radarr/Sonarr AND present in Jellyseerr requests
+    
     current_candidates_tmdb_ids = set(radarr_missing) | set(sonarr_missing)
     
-    # Load previously pending deletions
-    pending_deletions = load_pending_deletions()
-    
-    # Update pending list
     now = datetime.now(timezone.utc)
     updated_pending = {}
     
-    ready_to_delete_jellyseerr = []
+    ready_radarr = []
+    ready_sonarr = []
+    ready_jellyseerr = []
     
     # Process current candidates
     for tmdb_id in current_candidates_tmdb_ids:
+        # We only care if it's in Jellyseerr requests to get the date
+        req = jellyseerr_request_map.get(tmdb_id)
+        if not req:
+            continue
+            
         tmdb_id_str = str(tmdb_id)
-        if tmdb_id_str in pending_deletions:
-            # Keeps exisiting entry
-            entry = pending_deletions[tmdb_id_str]
-        else:
-            # New candidate
-            entry = {
-                "first_seen": now.isoformat(),
-                "tmdb_id": tmdb_id
-            }
+        request_date_str = req.get("request_date")
+        request_date = parse_iso_datetime(request_date_str)
         
+        # Entry for pending file
+        entry = {
+            "tmdb_id": tmdb_id,
+            "title": req.get("title"),
+            "request_date": request_date_str,
+            "requested_by": req.get("requested_by"),
+            "media_id": req.get("media_id")
+        }
+        
+        # Add to pending list
         updated_pending[tmdb_id_str] = entry
         
-        # Check grace period
-        first_seen = datetime.fromisoformat(entry["first_seen"])
-        if (now - first_seen).days >= DELETION_DELAY_DAYS:
-            # Ready for deletion
-             if tmdb_id in jellyseerr_request_map:
-                request = jellyseerr_request_map[tmdb_id]
-                ready_to_delete_jellyseerr.append({
-                    "title": request.get("title") or f"TMDB {tmdb_id}",
-                    "media_id": request["media_id"],
-                    "tmdb_id": tmdb_id,
-                })
+        # Check if ready to delete
+        if request_date:
+            # Ensure request_date is UTC aware if 'now' is
+            if request_date.tzinfo is None:
+                request_date = request_date.replace(tzinfo=timezone.utc)
+            
+            age_days = (now - request_date).days
+            if age_days >= DELETION_DELAY_DAYS:
+                # Ready for deletion
+                print(f"READY TO DELETE: {req.get('title')} (Age: {age_days} days, Requested by: {req.get('requested_by')})")
+                
+                # Add to execution lists
+                if tmdb_id in radarr_missing:
+                    ready_radarr.append(tmdb_id)
+                if tmdb_id in sonarr_missing:
+                    ready_sonarr.append(sonarr_missing[tmdb_id])
+                ready_jellyseerr.append(req)
+            else:
+                print(f"PENDING: {req.get('title')} (Age: {age_days} days < {DELETION_DELAY_DAYS} days delay)")
         else:
-             print(f"Deferring deletion for TMDB ID {tmdb_id} (In grace period, first seen {entry['first_seen']})")
+             print(f"SKIPPING: {req.get('title')} (No request date found)")
 
     # Save updated pending state
     save_pending_deletions(updated_pending)
 
-    if ready_to_delete_jellyseerr:
-        print("\nJellyseerr requests READY to delete (passed grace period):")
-        for request in ready_to_delete_jellyseerr:
-            print(
-                f"- {request['title']} (ID: {request['media_id']}, TMDB ID: {request['tmdb_id']})"
-            )
+    # Perform Deletions
+    if dry_run:
+        print("\n--- DRY RUN SUMMARY ---")
+        print(f"Would delete {len(ready_radarr)} movies from Radarr")
+        print(f"Would delete {len(ready_sonarr)} series from Sonarr")
+        print(f"Would delete {len(ready_jellyseerr)} requests from Jellyseerr")
+        if ready_jellyseerr:
+             for r in ready_jellyseerr:
+                 print(f"  - {r['title']} (Requested by {r['requested_by']} on {r['request_date']})")
     else:
-        print("\nNo Jellyseerr media ready to delete.")
-
-    radarr_ready = [
-        tmdb_id for tmdb_id in radarr_missing 
-        if str(tmdb_id) in updated_pending and 
-        (now - datetime.fromisoformat(updated_pending[str(tmdb_id)]["first_seen"])).days >= DELETION_DELAY_DAYS
-    ]
-    
-    sonarr_ready = []
-    for tmdb_id_str, entry in updated_pending.items():
-        tmdb_id = int(tmdb_id_str)
-        if tmdb_id in sonarr_missing:
-            # Check grace period
-             if (now - datetime.fromisoformat(entry["first_seen"])).days >= DELETION_DELAY_DAYS:
-                 sonarr_ready.append(sonarr_missing[tmdb_id])
-
-    temp_data = {
-        "radarr": radarr_ready,
-        "sonarr": sonarr_ready,
-        "jellyseerr": ready_to_delete_jellyseerr,
-    }
-    
-    if any(temp_data.values()):
-        write_to_temp_file(temp_data)
-        if dry_run:
-            print("\nDry run mode enabled. Ready deletions written to temp file (overwritten). Run without -d to perform deletions.")
+        if ready_radarr or ready_sonarr or ready_jellyseerr:
+            print("\nPerforming deletions...")
+            deletion_data = {
+                "radarr": ready_radarr,
+                "sonarr": ready_sonarr,
+                "jellyseerr": ready_jellyseerr
+            }
+            perform_deletions_list(RADARR_API_KEY, RADARR_URL, SONARR_API_KEY, SONARR_URL, deletion_data)
         else:
-            print("\nTemp file created with READY deletions. Run the script again to perform deletions.")
-    else:
-        print("\nNo media ready for deletion detected. Skipping temp file creation (or creating empty one).")
-        if os.path.exists(TEMP_FILE):
-            os.remove(TEMP_FILE)
+            print("\nNo media ready for deletion.")
 
 if __name__ == "__main__":
     args = parse_command_line_arguments()
-    if args.dry_run:
-        if os.path.exists(TEMP_FILE):
-            os.remove(TEMP_FILE)
-            print("Dry run flag provided: existing temp file removed before reporting.")
-        generate_missing_media_report(dry_run=True)
-    else:
-        if os.path.exists(TEMP_FILE):
-            print("Temp file found. Performing deletions...")
-            perform_deletions(RADARR_API_KEY, RADARR_URL, SONARR_API_KEY, SONARR_URL)
-        else:
-            generate_missing_media_report()
+    generate_missing_media_report(dry_run=args.dry_run)
