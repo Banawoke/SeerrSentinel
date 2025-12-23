@@ -91,3 +91,51 @@ python3 jellyseerr_cleaner.py --dry-run
 4.  **Grace Period**: The script checks how long an item has been pending.
 5.  **Stage**: If an item has been pending longer than `DELETION_DELAY_DAYS`, it is added to a "ready to delete" list (`/tmp/jellyseerr_deletions.json`).
 6.  **Execute**: If the script is run and finds the "ready to delete" list, it performs the removal.
+
+## Jellyseerr Search Automation (`jellyseerr_search.py`)
+
+The `jellyseerr_search.py` script automates the process of searching for "missing" content in Radarr and Sonarr. It helps trigger searches for items that are monitored but haven't been grabbed yet, applying smart filtering and cooldown logic to avoid API rate limits and redundant searches.
+
+### Features
+
+*   **Smart Detection**: Identifies movies in Radarr and episodes in Sonarr that are monitored, missing, and *released* (available).
+*   **Release Date Filtering**: Ignores unreleased content (future release dates) to prevent useless searches.
+*   **Cooldown System**:
+    *   **Request Cooldown**: Prevents searching for the same item more than once every 12 hours by default.
+    *   **Activity Cooldown**: Checks if the download client or indexer is currently busy (e.g., a search started by default < 10 mins ago) to avoid overloading the system.
+*   **Sonarr Optimization**:
+    *   Prioritizes "Season Search" if an entire season is missing or has multiple missing episodes.
+    *   Falls back to "Episode Search" for individual missing episodes.
+    *   Executes searches sequentially to prevent flooding. (first episode, then second, then third, etc.)
+*   **Mutual Exclusion**: Ensures that Radarr and Sonarr search processes do not run simultaneously (global lock mechanism) to manage system load.
+
+### Logic Flow
+
+1.  **Global Lock Check**: Checks if Radarr or Sonarr are currently running a search command. If so, it aborts to prevent conflicts.
+2.  **Radarr Check**:
+    *   Lists missing movies.
+    *   Filters out unreleased movies.
+    *   Checks the local history file for the last search time.
+    *   If a candidate is found and "cool" (not searched recently), triggers a `MoviesSearch` command.
+3.  **Sonarr Check** (Only if Radarr didn't take action):
+    *   Lists missing episodes.
+    *   Groups them by Series and Season.
+    *   Prioritizes triggering a `SeasonSearch` if justifiable.
+    *   Otherwise, triggers an `EpisodeSearch` for the first missing episode.
+4.  **History Tracking**: timestamps of searches are recorded in `/tmp/force_search_history.json` to manage cooldowns.
+
+### Usage
+
+This script is intended to be run via a cron job (e.g., every 5-15 minutes).
+
+```bash
+python3 jellyseerr_search.py
+```
+
+*   **No arguments**: The script runs its logic, performs at most *one* search action (Radarr OR Sonarr), and exits. This "slow and steady" approach ensures your indexers are not hammered.
+
+### Configuration
+
+The script uses the same `.env` file as the cleaner script. Ensure the following are set:
+*   `RADARR_API_KEY`, `RADARR_URL`
+*   `SONARR_API_KEY`, `SONARR_URL`
