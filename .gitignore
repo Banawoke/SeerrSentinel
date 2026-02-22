@@ -1,48 +1,12 @@
-# Fichiers de secrets - NE JAMAIS COMMITER
 .env
 .env.local
 .env.production
 .env.staging
 .ssh
-
-# Fichiers de sauvegarde
-*.bak
-*.backup
-*.old
-
-# Logs
-*.log
-logs/
-
-# Fichiers temporaires
 *.tmp
 *.temp
 .DS_Store
 Thumbs.db
-
-# Répertoires de configuration sensibles
-host_vars/
-
-# Clés SSH et certificats
-*.pem
-*.key
-*.crt
-*.p12
-*.pfx
-
-# Documentation Interne 
-
-*.txt
-# Fichiers de configuration Ansible avec secrets
-*secret*.yml
-*vault*.yml
-
-# Fichiers de base de données
-*.db
-*.sqlite
-*.sqlite3
-
-# Cache et fichiers temporaires Docker
-.docker/
-docker-compose.override.yml
-docker-compose.yaml.old
+*pycache*
+*.pyc
+tmp
