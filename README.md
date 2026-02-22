@@ -1,13 +1,10 @@
-<img style="vertical-align: middle;" src=".logo.png" width="120" height="120" align="left">
+<h1 align="center">SeerrSentinel</h1>
 
-# SeerrSentinel
+<p align="center">
+  <img src=".logo.png" alt="SeerrSentinel Logo" width="100" height="100">
+</p>
 
-Automation suite for managing **Seerr**, **Radarr**, and **Sonarr**.
-
-&nbsp;
-
-
-I was struggling to keep my *rr stack clean so i made this script. The goal of SeerrSentinel is to automate media discovery, library cleanup, and file imports for Seerr, Radarr, and Sonarr. It is inspired by [Huntarr.io](https://github.com/plexguide/Huntarr.io).
+Automation suite for managing **Seerr**, **Radarr**, and **Sonarr**. I was struggling to keep my library clean so i made this script. The goal of SeerrSentinel is to automate media discovery, library cleanup, and file imports for Seerr, Radarr, and Sonarr. It is inspired by [Huntarr.io](https://github.com/plexguide/Huntarr.io).
 
 >[!IMPORTANT]
 > This is very early software, any help will be verry welcome it work with my use case but may need some tweeks for yours. Report any bug or feature request 😊.
