@@ -127,6 +127,17 @@ class MediaImporter:
                     d = item.get("data", {})
                     if d.get("name"): aliases.add(d["name"])
                     if d.get("title"): aliases.add(d["title"])
+            
+            # 3. Base details 
+            url_base = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}?api_key={self.tmdb_key}"
+            resp = requests.get(url_base)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("title"): aliases.add(data["title"])
+                if data.get("original_title"): aliases.add(data["original_title"])
+                if data.get("name"): aliases.add(data["name"])
+                if data.get("original_name"): aliases.add(data["original_name"])
+
 
         except Exception as e:
             print(f"  -> [WARN] Error fetching TMDB aliases for ID {tmdb_id}: {e}")
