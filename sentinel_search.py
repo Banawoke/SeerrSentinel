@@ -28,9 +28,8 @@ RADARR_URL = _cfg["RADARR_URL"]
 SONARR_API_KEY = _cfg["SONARR_API_KEY"]
 SONARR_URL = _cfg["SONARR_URL"]
 HISTORY_FILE = "/tmp/force_search_history.json"
-COOLDOWN_REQUEST_MINUTES = 0
-COOLDOWN_DOWNLOAD_MINUTES = 0
-COOLDOWN_MAINTENANCE_MINUTES = 30
+COOLDOWN_REQUEST_MINUTES = 10
+COOLDOWN_DOWNLOAD_MINUTES = 10
 
 
 # Cycle Configuration
@@ -209,6 +208,53 @@ def is_released(item_type, item):
     return True
 
 
+# --- History Caches to prevent re-download of deleted media ---
+_radarr_history_cache = {}
+def is_movie_deleted_in_history(movie_id):
+    if movie_id in _radarr_history_cache:
+        return _radarr_history_cache[movie_id]
+
+    try:
+        url = f"{RADARR_URL}/api/v3/history/movie?movieId={movie_id}"
+        resp = requests.get(url, headers={"X-Api-Key": RADARR_API_KEY})
+        resp.raise_for_status()
+        events = resp.json()
+
+        for ev in events:
+            if ev.get("eventType") == "movieFileDeleted":
+                _radarr_history_cache[movie_id] = True
+                return True
+
+        _radarr_history_cache[movie_id] = False
+        return False
+    except Exception as e:
+        print(f"Error checking Radarr history for movie {movie_id}: {e}")
+        return False
+
+
+_sonarr_history_cache = {}
+def is_episode_deleted_in_history(series_id, episode_id):
+    if series_id not in _sonarr_history_cache:
+        try:
+            url = f"{SONARR_URL}/api/v3/history/series?seriesId={series_id}"
+            resp = requests.get(url, headers={"X-Api-Key": SONARR_API_KEY})
+            resp.raise_for_status()
+            events = resp.json()
+
+            deleted_eps = set()
+            for ev in events:
+                if ev.get("eventType") == "episodeFileDeleted":
+                    ep_id = ev.get("episodeId")
+                    if ep_id:
+                        deleted_eps.add(ep_id)
+            _sonarr_history_cache[series_id] = deleted_eps
+        except Exception as e:
+            print(f"Error checking Sonarr history for series {series_id}: {e}")
+            _sonarr_history_cache[series_id] = set()
+
+    return episode_id in _sonarr_history_cache[series_id]
+# -------------------------------------------------------------
+
 def get_sonarr_series_map():
     if not SONARR_API_KEY or not SONARR_URL:
         return {}
@@ -232,12 +278,31 @@ def list_missing_content(series_map=None):
              resp = requests.get(url, headers={"X-Api-Key": RADARR_API_KEY})
              movies = resp.json().get("records", [])
              
-             # Filter unreleased
+             # Filter unreleased and deleted
              released_movies = [m for m in movies if is_released("movie", m)]
+             unreleased_movies = [m for m in movies if not is_released("movie", m)]
              
-             print(f"[Radarr] Found {len(released_movies)} released missing movies (out of {len(movies)} total missing):")
+             eligible_movies = []
+             deleted_history_movies = []
              for m in released_movies:
+                 if is_movie_deleted_in_history(m.get("id")):
+                     deleted_history_movies.append(m)
+                 else:
+                     eligible_movies.append(m)
+             
+             print(f"[Radarr] Found {len(eligible_movies)} eligible missing movies (out of {len(movies)} total missing):")
+             for m in eligible_movies:
                  print(f"  - {m['title']} (ID: {m['id']}, Year: {m['year']})")
+                 
+             if deleted_history_movies:
+                 print(f"[Radarr] Skipped {len(deleted_history_movies)} movies due to previous deletion history:")
+                 for m in deleted_history_movies:
+                     print(f"  ~ {m['title']} (File previously deleted)")
+                     
+             if unreleased_movies:
+                 print(f"[Radarr] Skipped {len(unreleased_movies)} movies due to unreleased status:")
+                 for m in unreleased_movies:
+                     print(f"  ~ {m['title']} (Not released yet)")
         except Exception as e:
             print(f"[Radarr] Error fetching summary: {e}")
             
@@ -253,17 +318,28 @@ def list_missing_content(series_map=None):
             
             # Group for display
             series_stats = {}
+            deleted_stats = {}
+            unreleased_stats = {}
             filtered_count = 0
             
             for ep in episodes:
+                s_id = ep.get("seriesId")
+                s_title = series_map.get(s_id) or ep.get("series", {}).get("title", f"Series {s_id}")
+
                 if not is_released("episode", ep):
+                    if s_title not in unreleased_stats:
+                        unreleased_stats[s_title] = 0
+                    unreleased_stats[s_title] += 1
+                    continue
+                    
+                # Check history cache
+                if is_episode_deleted_in_history(s_id, ep.get("id")):
+                    if s_title not in deleted_stats:
+                        deleted_stats[s_title] = 0
+                    deleted_stats[s_title] += 1
                     continue
                     
                 filtered_count += 1
-                s_id = ep.get("seriesId")
-                # Try map first, then episode object, then fallback
-                s_title = series_map.get(s_id) or ep.get("series", {}).get("title", f"Series {s_id}")
-                
                 if s_title not in series_stats:
                     series_stats[s_title] = 0
                 series_stats[s_title] += 1
@@ -271,6 +347,16 @@ def list_missing_content(series_map=None):
             print(f"[Sonarr] Found {filtered_count} released missing episodes (out of {len(episodes)} total missing) across {len(series_stats)} series:")
             for title, count in series_stats.items():
                 print(f"  - {title}: {count} episodes missing")
+                
+            if deleted_stats:
+                print(f"[Sonarr] Skipped episodes due to previous deletion history:")
+                for title, count in deleted_stats.items():
+                    print(f"  ~ {title}: {count} episodes skipped")
+            
+            if unreleased_stats:
+                print(f"[Sonarr] Skipped episodes due to unreleased status (future air date):")
+                for title, count in unreleased_stats.items():
+                    print(f"  ~ {title}: {count} episodes skipped")
 
         except Exception as e:
              print(f"[Sonarr] Error fetching summary: {e}")
@@ -365,12 +451,17 @@ def process_radarr():
 
         # Check Queue presence
         if movie_id in queued_ids:
-            # print(f"Skipping {title}: Already in queue.")
+            print(f"Skipping {title}: Already in queue.")
+            continue
+            
+        # Check History for intentional deletion
+        if is_movie_deleted_in_history(movie_id):
+            print(f"Skipping {title}: Movie file was previously deleted.")
             continue
 
         # Check Cycle Quota
         if not check_cycle_quota(key, "movie"):
-            # print(f"Skipping {title}: Cycle quota reached.")
+            print(f"Skipping {title}: Cycle quota reached.")
             continue
 
         last_search = get_last_search_timestamp(key)
@@ -384,6 +475,8 @@ def process_radarr():
                 "movie": movie,
                 "last_search": last_search
             })
+        else:
+            print(f"Skipping {title}: Cooldown active.")
 
     if not candidates:
          print("No eligible Radarr candidates (queue active, cycle limits, or unreleased).")
@@ -457,9 +550,16 @@ def process_sonarr(series_map=None):
             
         # Check if this specific episode is in queue
         if ep.get("id") in queued_ids:
+            # print(f"Skipping Sonarr Episode {ep.get('id')}: Already in queue.")
             continue
             
         s_id = ep.get("seriesId")
+        
+        # Check History for intentional deletion
+        if is_episode_deleted_in_history(s_id, ep.get("id")):
+            # print(f"Skipping Sonarr Episode {ep.get('id')}: Episode file was previously deleted.")
+            continue
+            
         s_num = ep.get("seasonNumber")
         
         key = (s_id, s_num)
@@ -514,27 +614,35 @@ def process_sonarr(series_map=None):
         
         # Define check routines
         def check_season():
-            if check_cycle_quota(season_key, "season") and is_cooled_down(season_last_search_iso):
-                return {
-                    "type": "SeasonSearch",
-                    "last_search": season_last_search_iso,
-                    "series_id": series_id,
-                    "season_num": season_num,
-                    "title": f"{series_title} Season {season_num}",
-                    "print_title": f"{series_title} Season {season_num}"
-                }
-            return None
+            if not check_cycle_quota(season_key, "season"):
+                print(f"Skipping {series_title} Season {season_num}: Cycle quota reached.")
+                return None
+            if not is_cooled_down(season_last_search_iso):
+                print(f"Skipping {series_title} Season {season_num}: Cooldown active.")
+                return None
+            return {
+                "type": "SeasonSearch",
+                "last_search": season_last_search_iso,
+                "series_id": series_id,
+                "season_num": season_num,
+                "title": f"{series_title} Season {season_num}",
+                "print_title": f"{series_title} Season {season_num}"
+            }
 
         def check_episode():
-             if check_cycle_quota(ep_key, "episode") and is_cooled_down(ep_last_search_iso):
-                return {
-                    "type": "EpisodeSearch",
-                    "last_search": ep_last_search_iso,
-                    "episode_id": ep_id,
-                    "title": f"{series_title} S{season_num}E{ep_num} - {ep_title}",
-                    "print_title": f"{series_title} S{season_num}E{ep_num}"
-                }
-             return None
+             if not check_cycle_quota(ep_key, "episode"):
+                 print(f"Skipping {series_title} S{season_num}E{ep_num}: Cycle quota reached.")
+                 return None
+             if not is_cooled_down(ep_last_search_iso):
+                 print(f"Skipping {series_title} S{season_num}E{ep_num}: Cooldown active.")
+                 return None
+             return {
+                 "type": "EpisodeSearch",
+                 "last_search": ep_last_search_iso,
+                 "episode_id": ep_id,
+                 "title": f"{series_title} S{season_num}E{ep_num} - {ep_title}",
+                 "print_title": f"{series_title} S{season_num}E{ep_num}"
+             }
 
         # Execute decision
         if prefer_season:
@@ -613,10 +721,6 @@ def process_sonarr(series_map=None):
         print(f"Error triggering Sonarr search: {e}")
         return False
 
-# Ensure local directory is in path for imports
-sys.path.append(str(Path(__file__).parent))
-from sentinel_import import RadarrImporter, SonarrImporter
-
 if __name__ == "__main__":
     print(f"--- SeerrSentinel Search Run: {datetime.now()} ---")
     
@@ -627,49 +731,6 @@ if __name__ == "__main__":
     if radarr_busy or sonarr_busy:
         print("Global Lock: One or more services are busy performing a search. Aborting run.")
         sys.exit(0)
-
-    # Local Import Maintenance (Orphans)
-    # Cooldown Logic
-    MAINTENANCE_KEY = "maintenance_last_run"
-    history = load_history()
-    last_maint_iso = history.get(MAINTENANCE_KEY)
-    
-    run_maintenance = False
-    if not last_maint_iso:
-        run_maintenance = True
-    else:
-        try:
-            last_maint = datetime.fromisoformat(last_maint_iso)
-            if last_maint.tzinfo is None:
-                last_maint = last_maint.replace(tzinfo=timezone.utc)
-            now = datetime.now(timezone.utc)
-            if (now - last_maint) > timedelta(minutes=COOLDOWN_MAINTENANCE_MINUTES):
-                run_maintenance = True
-            else:
-                remaining = timedelta(minutes=COOLDOWN_MAINTENANCE_MINUTES) - (now - last_maint)
-                print(f"[Maintenance] Skipped. Cooldown active ({int(remaining.total_seconds()//60)}m remaining).")
-        except ValueError:
-            run_maintenance = True
-            
-    if run_maintenance:
-        print("\n[Maintenance] Cooldown expired. Running Orphan Checks...")
-        
-        print("  -> Radarr...")
-        try:
-            RadarrImporter().run()
-        except Exception as e:
-            print(f"Info: Radarr import check skipped/failed: {e}")
-
-        print("  -> Sonarr...")
-        try:
-            SonarrImporter().run()
-        except Exception as e:
-            print(f"Info: Sonarr import check skipped/failed: {e}")
-            
-        # Update History
-        history[MAINTENANCE_KEY] = datetime.now(timezone.utc).isoformat()
-        save_history(history)
-        print("[Maintenance] Completed and timestamp recorded.\n")
 
     s_map = get_sonarr_series_map()
     list_missing_content(s_map)
