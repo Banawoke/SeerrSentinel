@@ -124,4 +124,5 @@ seerr_sentinel.py          ← orchestrator + load_config()
 ```cron
 20 */4 * * *  python3 /seerr_sentinel/seerr_sentinel.py clean
 */10 * * * *  python3 /seerr_sentinel/seerr_sentinel.py search
+*/30 * * * *  python3 /seerr_sentinel/seerr_sentinel.py import
 ```
