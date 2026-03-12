@@ -3,11 +3,11 @@
 SeerrSentinel — Central orchestrator and configuration loader.
 
 Usage:
+    python3 seerr_sentinel.py all [--dry-run]
     python3 seerr_sentinel.py --check-env
     python3 seerr_sentinel.py search
     python3 seerr_sentinel.py clean [--dry-run]
     python3 seerr_sentinel.py import [--radarr] [--sonarr] [--force-id N]
-    python3 seerr_sentinel.py all [--dry-run]
 """
 
 import os
@@ -48,6 +48,8 @@ _ALL_OPTIONAL_VARS = {
     "RELEASE_BUFFER_DAYS": "7",
     "DELETION_DELAY_DAYS": "2",
     "KEEP_REQUESTS_OLDER_THAN_DAYS": "14",
+    "STUCK_DOWNLOAD_MINUTES": "20.0",
+    "MAX_DOWNLOAD_HOURS": "6.0",
 }
 
 
@@ -224,15 +226,53 @@ def main() -> None:
         sys.exit(_run_script("sentinel_import.py", extra))
 
     elif args.command == "all":
-        print("▶  [1/3] SEARCH")
+        import json
+        from datetime import datetime, timezone, timedelta
+        
+        def _check_schedule(job: str, interval_minutes: int) -> bool:
+            fpath = Path("/tmp/seerr_sentinel_schedule.json")
+            sched = {}
+            if fpath.exists():
+                try:
+                    with open(fpath, "r") as f:
+                        sched = json.load(f)
+                except Exception:
+                    pass
+            now = datetime.now(timezone.utc)
+            last_run_str = sched.get(job)
+            if not last_run_str:
+                sched[job] = now.isoformat()
+                with open(fpath, "w") as f: json.dump(sched, f)
+                return True
+            try:
+                last_run = datetime.fromisoformat(last_run_str)
+                if (now - last_run) >= timedelta(minutes=interval_minutes):
+                    sched[job] = now.isoformat()
+                    with open(fpath, "w") as f: json.dump(sched, f)
+                    return True
+            except Exception:
+                sched[job] = now.isoformat()
+                with open(fpath, "w") as f: json.dump(sched, f)
+                return True
+            return False
+
+        print("▶  [1/3] SEARCH (Every run)")
         rc1 = _run_script("sentinel_search.py")
 
-        print("\n▶  [2/3] CLEAN")
-        clean_args = ["--dry-run"] if args.dry_run else []
-        rc2 = _run_script("sentinel_cleaner.py", clean_args)
+        rc2 = 0
+        if _check_schedule("clean", 240):
+            print("\n▶  [2/3] CLEAN (Executed - Interval 4h reached)")
+            clean_args = ["--dry-run"] if args.dry_run else []
+            rc2 = _run_script("sentinel_cleaner.py", clean_args)
+        else:
+            print("\n▶  [2/3] CLEAN (Skipped - Interval 4h not reached)")
 
-        print("\n▶  [3/3] IMPORT")
-        rc3 = _run_script("sentinel_import.py")
+        rc3 = 0
+        if _check_schedule("import", 30):
+            print("\n▶  [3/3] IMPORT (Executed - Interval 30m reached)")
+            rc3 = _run_script("sentinel_import.py")
+        else:
+            print("\n▶  [3/3] IMPORT (Skipped - Interval 30m not reached)")
 
         worst = max(rc1, rc2, rc3)
         print(f"\n{separator}")

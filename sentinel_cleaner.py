@@ -39,6 +39,8 @@ TMDB_TITLE_CACHE = {}
 RELEASE_BUFFER_DAYS = int(os.environ.get("RELEASE_BUFFER_DAYS", "7"))
 DELETION_DELAY_DAYS = int(os.environ.get("DELETION_DELAY_DAYS", "2"))
 KEEP_REQUESTS_OLDER_THAN_DAYS = int(os.environ.get("KEEP_REQUESTS_OLDER_THAN_DAYS", "14"))
+STUCK_DOWNLOAD_MINUTES = float(os.environ.get("STUCK_DOWNLOAD_MINUTES", "20.0"))
+MAX_DOWNLOAD_HOURS = float(os.environ.get("MAX_DOWNLOAD_HOURS", "6.0"))
 
 PENDING_FILE = "/tmp/jellyseerr_pending_deletions.json"
 
@@ -483,6 +485,73 @@ def delete_sonarr_series(api_key, base_url, tmdb_id):
     delete_response.raise_for_status()
     print(f"Successfully deleted series with TMDB ID {tmdb_id} from Sonarr.")
 
+def clean_stuck_downloads(api_key, base_url, app_name, dry_run=False):
+    headers = {"X-Api-Key": api_key}
+    url = f"{base_url}/api/v3/queue"
+    response = requests.get(url, headers=headers)
+    response.raise_for_status()
+    data = response.json()
+    records = data.get("records", [])
+    
+    stuck_records = []
+    now = datetime.now(timezone.utc)
+    
+    print(f"\nEvaluating downloads in {app_name}...")
+    for r in records:
+        size = r.get("size", 0)
+        sizeleft = r.get("sizeleft", 0)
+        title = r.get("title", "Unknown")
+        
+        if size > 0:
+            progress = 1.0 - (sizeleft / float(size))
+        else:
+            progress = 0.0
+            
+        added_str = r.get("added")
+        added_dt = parse_iso_datetime(added_str)
+        if not added_dt:
+            print(f"  [?] Skipping {title} (No added date)")
+            continue
+            
+        if added_dt.tzinfo is None:
+            added_dt = added_dt.replace(tzinfo=timezone.utc)
+            
+        age_hours = (now - added_dt).total_seconds() / 3600.0
+        age_minutes = (now - added_dt).total_seconds() / 60.0
+        
+        reason = None
+        if progress <= 0.05 and age_minutes >= STUCK_DOWNLOAD_MINUTES:
+            reason = f"Progress is low ({progress*100:.2f}% <= 5%) after {age_minutes:.1f} minutes (limit: {STUCK_DOWNLOAD_MINUTES}m)."
+        elif age_hours >= MAX_DOWNLOAD_HOURS:
+            reason = f"Download taking too long ({age_hours:.1f}h >= {MAX_DOWNLOAD_HOURS}h), currently at {progress*100:.2f}%."
+            
+        if reason:
+            print(f" Mark for removal: {title}")
+            print(f" Reason: {reason}")
+            stuck_records.append((r, reason))
+        else:
+            print(f"Keep: {title} | Progress: {progress*100:.2f}% | Age: {age_minutes:.1f} minutes | Status: {r.get('status')}")
+            
+    if not stuck_records:
+        return
+
+    print(f"\n--- Removing {len(stuck_records)} stuck downloads in {app_name} ---")
+    for r, reason in stuck_records:
+        title = r.get("title", "Unknown")
+        record_id = r.get("id")
+        
+        if not dry_run:
+            delete_url = f"{base_url}/api/v3/queue/{record_id}"
+            params = {"removeFromClient": "true", "blocklist": "true"}
+            try:
+                delete_response = requests.delete(delete_url, headers=headers, params=params)
+                delete_response.raise_for_status()
+                print(f"  -> Successfully removed and blocklisted: {title}")
+            except Exception as e:
+                print(f"  -> Failed to remove {title}: {e}")
+        else:
+            print(f"  -> [DRY RUN] Would remove and blocklist: {title}")
+
 
 
 def get_all_radarr_movies(api_key, base_url):
@@ -604,7 +673,7 @@ def generate_missing_media_report(dry_run=False):
 
     all_radarr_movies = get_all_radarr_movies_with_status(RADARR_API_KEY, RADARR_URL)
     all_sonarr_series = get_all_sonarr_series_with_status(SONARR_API_KEY, SONARR_URL)
-pyrefly
+
     print("\n--- Radarr Movies ---")
     for tmdb_id, movie in all_radarr_movies.items():
         title = friendly_radarr_title(movie)
@@ -786,4 +855,9 @@ pyrefly
 
 if __name__ == "__main__":
     args = parse_command_line_arguments()
+    
+    print("--- Cleaning Stuck Downloads ---")
+    clean_stuck_downloads(RADARR_API_KEY, RADARR_URL, "Radarr", dry_run=args.dry_run)
+    clean_stuck_downloads(SONARR_API_KEY, SONARR_URL, "Sonarr", dry_run=args.dry_run)
+    
     generate_missing_media_report(dry_run=args.dry_run)

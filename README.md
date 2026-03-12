@@ -84,21 +84,28 @@ python3 sentinel_import.py --radarr
 | `RELEASE_BUFFER_DAYS` | optional | Days after release before cleanup (default: `7`) |
 | `DELETION_DELAY_DAYS` | optional | Grace period before deletion (default: `2`) |
 | `KEEP_REQUESTS_OLDER_THAN_DAYS` | optional | Keep Jellyseerr requests older than N days (default: `14`) |
+| `STUCK_DOWNLOAD_MINUTES` | optional | Minutes to wait before removing a download with <= 5% progress (default: `20.0`) |
+| `MAX_DOWNLOAD_HOURS` | optional | Maximum hours before a download is removed regardless of progress (default: `6.0`) |
 
 ## Architecture
 
 ```
-seerr_sentinel.py          ← orchestrator + load_config()
+seerr_sentinel.py          ← orchestrator + load_config() + scheduling
 ├── sentinel_search.py     ← Radarr/Sonarr MoviesSearch / SeasonSearch / EpisodeSearch
-│   └── (imports sentinel_import for orphan maintenance)
 ├── sentinel_cleaner.py    ← missing media detection + Radarr/Sonarr/Jellyseerr deletion
 └── sentinel_import.py     ← hard-link injection + Radarr/Sonarr rescan
 ```
 
+### `seerr_sentinel.py all` logic
+
+When running the `all` command across a cron schedule (e.g., every 10 min), the script manages its own sub-intervals via a lightweight local JSON cache:
+- **Search**: Executes only every 10 min.
+- **Import**: Executes only if 30 minutes have passed since the last run.
+- **Clean**: Executes only if 4 hours have passed since the last run.
+
 ### `sentinel_search` logic
 
 1. Checks for active commands (global lock)
-2. Every 30 min: runs `sentinel_import` to detect orphans
 3. Looks for a missing Radarr candidate → triggers `MoviesSearch`
 4. If nothing on Radarr side → looks at Sonarr → `SeasonSearch` or `EpisodeSearch`
 5. Per-cycle quota (12h) to avoid flooding indexers
@@ -109,6 +116,7 @@ seerr_sentinel.py          ← orchestrator + load_config()
 2. Ignores recent releases (`RELEASE_BUFFER_DAYS`)
 3. After `DELETION_DELAY_DAYS` days → deletes from Radarr/Sonarr and Jellyseerr
 4. Keeps Jellyseerr requests older than `KEEP_REQUESTS_OLDER_THAN_DAYS` days
+5. Detects stuck downloads in Radarr/Sonarr queues (<= 5% progress after `STUCK_DOWNLOAD_MINUTES` or any progress after `MAX_DOWNLOAD_HOURS`) and blocklists them
 
 ### `sentinel_import` logic
 
@@ -122,7 +130,5 @@ seerr_sentinel.py          ← orchestrator + load_config()
 ### Cronjob 
 
 ```cron
-20 */4 * * *  python3 /seerr_sentinel/seerr_sentinel.py clean
-*/10 * * * *  python3 /seerr_sentinel/seerr_sentinel.py search
-*/30 * * * *  python3 /seerr_sentinel/seerr_sentinel.py import
+*/10 * * * *  python3 /seerr_sentinel/seerr_sentinel.py all
 ```
