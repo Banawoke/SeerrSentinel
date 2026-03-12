@@ -19,28 +19,84 @@ Automation suite for managing **Seerr**, **Radarr**, and **Sonarr**. I was strug
 
 ## Installation
 
-### 1. Configure the environment
+It is highly recommended to use **Docker** or **Docker Compose**. A continuously updated image is available.
 
+### Using Docker Compose (Recommended)
+
+1. Create a `docker-compose.yml` file:
+```yaml
+services:
+  seerr-sentinel:
+    image: ghcr.io/banawoke/seerrsentinel:latest
+    container_name: seerr-sentinel
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - /path/to/your/downloads:/downloads
+```
+2. Create your `.env` file (see Configuration section below) next to the `docker-compose.yml`.
+3. Start the container:
+```bash
+docker compose up -d
+```
+
+### Using Docker CLI
+
+```bash
+docker run -d \
+  --name seerr-sentinel \
+  --restart unless-stopped \
+  --env-file /path/to/your/.env \
+  -v /path/to/your/downloads:/downloads \
+  ghcr.io/banawoke/seerrsentinel:latest
+```
+
+### Manual Installation (Python)
+
+If you prefer to run the scripts manually:
+
+1. **Configure the environment**
 ```bash
 cp .env.example .env
 # Edit .env with your API keys and URLs
 ```
 
-### 2. Check your configuration
+2. **Python dependencies**
+```bash
+pip install -r requirements.txt
+```
 
+3. **Check your configuration**
 ```bash
 python3 seerr_sentinel.py --check-env
 ```
 
-### 3. Python dependencies
-
-```bash
-pip install requests python-dotenv
-```
-
 ## Usage
 
-### Simple
+### Docker (Daemon Mode)
+
+When using the Docker image, the script automatically runs in `daemon` mode. It stays alive in the background and handles its own schedule:
+- **Search**: every 15 minutes
+- **Import**: every 30 minutes
+- **Clean**: every 4 hours
+
+You can check everything it does in real-time by reading the logs:
+```bash
+docker logs -f seerr-sentinel
+```
+
+Alternatively, you can manually trigger operations inside the container:
+```bash
+docker exec -it seerr-sentinel python3 seerr_sentinel.py clean --dry-run
+docker exec -it seerr-sentinel python3 seerr_sentinel.py search
+```
+
+### Manual Usage (Python)
+
+If you are running the scripts manually:
+
+#### Simple
 
 ```bash
 # Check the .env before anything else
@@ -105,10 +161,10 @@ seerr_sentinel.py          ← orchestrator + load_config() + scheduling
 └── sentinel_import.py     ← hard-link injection + Radarr/Sonarr rescan
 ```
 
-### `seerr_sentinel.py all` logic
+### `seerr_sentinel.py all` and `daemon` logic
 
-When running the `all` command across a cron schedule (e.g., every 10 min), the script manages its own sub-intervals via a lightweight local JSON cache:
-- **Search**: Executes only every 10 min.
+When running the `all` command (or the Docker `daemon` mode), the script manages its own sub-intervals via a lightweight local JSON cache:
+- **Search**: Executes only every 15 min.
 - **Import**: Executes only if 30 minutes have passed since the last run.
 - **Clean**: Executes only if 4 hours have passed since the last run.
 
@@ -136,8 +192,8 @@ When running the `all` command across a cron schedule (e.g., every 10 min), the 
 
 ## Use case example
 
-### Cronjob 
+### Manual Cronjob (if not using Docker daemon)
 
 ```cron
-*/10 * * * *  python3 /seerr_sentinel/seerr_sentinel.py all
+*/15 * * * *  python3 /seerr_sentinel/seerr_sentinel.py all
 ```
