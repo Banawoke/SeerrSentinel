@@ -30,13 +30,27 @@ services:
     image: ghcr.io/banawoke/seerrsentinel:latest
     container_name: seerr-sentinel
     restart: unless-stopped
-    env_file:
-      - .env
+    environment:
+      - JELLYSEER_API_KEY=your_api_key
+      - JELLYSEER_URL=http://your-jellyseerr:5055
+      - TMDB_API_KEY=your_api_key
+      - RADARR_API_KEY=your_api_key
+      - RADARR_URL=http://your-radarr:7878
+      - SONARR_API_KEY=your_api_key
+      - SONARR_URL=http://your-sonarr:8989
+      - DOWNLOADS_PATH=/downloads
+      - PUID=1000
+      - PGID=1000
+      # Optional variables
+      # - RELEASE_BUFFER_DAYS=7
+      # - DELETION_DELAY_DAYS=2
+      # - KEEP_REQUESTS_OLDER_THAN_DAYS=14
+      # - STUCK_DOWNLOAD_MINUTES=20.0
+      # - MAX_DOWNLOAD_HOURS=6.0
     volumes:
       - /path/to/your/downloads:/downloads
 ```
-2. Create your `.env` file (see Configuration section below) next to the `docker-compose.yml`.
-3. Start the container:
+2. Start the container:
 ```bash
 docker compose up -d
 ```
@@ -47,7 +61,18 @@ docker compose up -d
 docker run -d \
   --name seerr-sentinel \
   --restart unless-stopped \
-  --env-file /path/to/your/.env \
+  -e JELLYSEER_API_KEY=your_api_key \
+  -e JELLYSEER_URL=http://your-jellyseerr:5055 \
+  -e TMDB_API_KEY=your_api_key \
+  -e RADARR_API_KEY=your_api_key \
+  -e RADARR_URL=http://your-radarr:7878 \
+  -e SONARR_API_KEY=your_api_key \
+  -e SONARR_URL=http://your-sonarr:8989 \
+  -e DOWNLOADS_PATH=/downloads \
+  -e PUID=1000 \
+  -e PGID=1000 \
+  # -e RELEASE_BUFFER_DAYS=7 \
+  # -e DELETION_DELAY_DAYS=2 \
   -v /path/to/your/downloads:/downloads \
   ghcr.io/banawoke/seerrsentinel:latest
 ```

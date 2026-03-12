@@ -243,7 +243,28 @@ def main() -> None:
         import time
         from datetime import datetime, timezone, timedelta
         
-        def _check_schedule(job: str, interval_minutes: int) -> bool:
+        def _should_run(job: str, interval_minutes: int) -> bool:
+            fpath = Path("/tmp/seerr_sentinel_schedule.json")
+            if not fpath.exists(): 
+                return True
+            try:
+                with open(fpath, "r") as f:
+                    sched = json.load(f)
+            except Exception:
+                return True
+            last_run_str = sched.get(job)
+            if not last_run_str: 
+                return True
+            try:
+                last_run = datetime.fromisoformat(last_run_str)
+                now = datetime.now(timezone.utc)
+                if (now - last_run) >= timedelta(minutes=interval_minutes):
+                    return True
+            except Exception:
+                return True
+            return False
+
+        def _update_run(job: str):
             fpath = Path("/tmp/seerr_sentinel_schedule.json")
             sched = {}
             if fpath.exists():
@@ -252,64 +273,67 @@ def main() -> None:
                         sched = json.load(f)
                 except Exception:
                     pass
-            now = datetime.now(timezone.utc)
-            last_run_str = sched.get(job)
-            if not last_run_str:
-                sched[job] = now.isoformat()
-                with open(fpath, "w") as f: json.dump(sched, f)
-                return True
+            sched[job] = datetime.now(timezone.utc).isoformat()
             try:
-                last_run = datetime.fromisoformat(last_run_str)
-                if (now - last_run) >= timedelta(minutes=interval_minutes):
-                    sched[job] = now.isoformat()
-                    with open(fpath, "w") as f: json.dump(sched, f)
-                    return True
+                with open(fpath, "w") as f:
+                    json.dump(sched, f)
             except Exception:
-                sched[job] = now.isoformat()
-                with open(fpath, "w") as f: json.dump(sched, f)
-                return True
-            return False
+                pass
 
         def _run_pass(is_daemon=False):
-            rc1 = 0
-            if is_daemon and not _check_schedule("search", 15):
-                print("▶  [1/3] SEARCH (Skipped - Interval 15m not reached)")
-            else:
-                print("▶  [1/3] SEARCH (Executed)")
-                rc1 = _run_script("sentinel_search.py")
+            rc1 = rc2 = rc3 = 0
 
-            rc2 = 0
-            if _check_schedule("clean", 240):
-                print("\n▶  [2/3] CLEAN (Executed - Interval 4h reached)")
+            # In 'all' (manual / cron), SEARCH runs unconditionally.
+            # In 'daemon', SEARCH runs every 15 minutes.
+            run_search = not is_daemon or _should_run("search", 15)
+            run_clean = _should_run("clean", 240)
+            run_import = _should_run("import", 30)
+
+            # Silently skip if there's nothing to do in daemon mode
+            if is_daemon and not (run_search or run_clean or run_import):
+                return 0, False
+
+            if is_daemon:
+                print(f"\n{separator}")
+                print(f"  SeerrSentinel  ›  DAEMON ACTIVATED AT {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                print(f"{separator}\n")
+
+            if run_search:
+                print("▶  [1/3] SEARCH (Executed)")
+                _update_run("search")
+                rc1 = _run_script("sentinel_search.py")
+            elif not is_daemon:
+                print("▶  [1/3] SEARCH (Skipped - Interval 15m not reached)")
+
+            if run_clean:
+                print("\n▶  [2/3] CLEAN (Executed)")
+                _update_run("clean")
                 clean_args = ["--dry-run"] if args.dry_run else []
                 rc2 = _run_script("sentinel_cleaner.py", clean_args)
-            else:
+            elif not is_daemon:
                 print("\n▶  [2/3] CLEAN (Skipped - Interval 4h not reached)")
 
-            rc3 = 0
-            if _check_schedule("import", 30):
-                print("\n▶  [3/3] IMPORT (Executed - Interval 30m reached)")
+            if run_import:
+                print("\n▶  [3/3] IMPORT (Executed)")
+                _update_run("import")
                 rc3 = _run_script("sentinel_import.py")
-            else:
+            elif not is_daemon:
                 print("\n▶  [3/3] IMPORT (Skipped - Interval 30m not reached)")
 
-            return max(rc1, rc2, rc3)
+            return max(rc1, rc2, rc3), True
 
         if args.command == "all":
-            worst = _run_pass(is_daemon=False)
+            worst, _ = _run_pass(is_daemon=False)
             print(f"\n{separator}")
             print(f"  SeerrSentinel  ›  ALL done (exit codes up to {worst})")
             print(f"{separator}")
             sys.exit(worst)
         elif args.command == "daemon":
             print("Starting daemon mode. Press Ctrl+C to stop.")
+            print("(Logs are currently suppressed when idle to keep things clean)")
             try:
                 while True:
-                    print(f"\n{separator}")
-                    print(f"  SeerrSentinel  ›  DAEMON PASS AT {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-                    print(f"{separator}\n")
                     _run_pass(is_daemon=True)
-                    print(f"\nSleeping for {args.interval} seconds...")
                     time.sleep(args.interval)
             except KeyboardInterrupt:
                 print("\nDaemon stopped by user.")
