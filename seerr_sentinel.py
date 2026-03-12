@@ -180,12 +180,25 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Force a specific Series/Movie ID",
     )
 
-    # all
     all_p = subparsers.add_parser("all", help="Run all operations in sequence")
     all_p.add_argument(
         "--dry-run",
         action="store_true",
         help="Dry-run mode for the clean step",
+    )
+
+    # daemon
+    daemon_p = subparsers.add_parser("daemon", help="Run continuously in the background")
+    daemon_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Dry-run mode for the clean step",
+    )
+    daemon_p.add_argument(
+        "--interval",
+        type=int,
+        default=60,
+        help="Wait time in seconds between loops",
     )
 
     return parser
@@ -225,8 +238,9 @@ def main() -> None:
             extra += ["--force-id", str(args.force_id)]
         sys.exit(_run_script("sentinel_import.py", extra))
 
-    elif args.command == "all":
+    elif args.command in ("all", "daemon"):
         import json
+        import time
         from datetime import datetime, timezone, timedelta
         
         def _check_schedule(job: str, interval_minutes: int) -> bool:
@@ -256,29 +270,50 @@ def main() -> None:
                 return True
             return False
 
-        print("▶  [1/3] SEARCH (Every run)")
-        rc1 = _run_script("sentinel_search.py")
+        def _run_pass(is_daemon=False):
+            rc1 = 0
+            if is_daemon and not _check_schedule("search", 15):
+                print("▶  [1/3] SEARCH (Skipped - Interval 15m not reached)")
+            else:
+                print("▶  [1/3] SEARCH (Executed)")
+                rc1 = _run_script("sentinel_search.py")
 
-        rc2 = 0
-        if _check_schedule("clean", 240):
-            print("\n▶  [2/3] CLEAN (Executed - Interval 4h reached)")
-            clean_args = ["--dry-run"] if args.dry_run else []
-            rc2 = _run_script("sentinel_cleaner.py", clean_args)
-        else:
-            print("\n▶  [2/3] CLEAN (Skipped - Interval 4h not reached)")
+            rc2 = 0
+            if _check_schedule("clean", 240):
+                print("\n▶  [2/3] CLEAN (Executed - Interval 4h reached)")
+                clean_args = ["--dry-run"] if args.dry_run else []
+                rc2 = _run_script("sentinel_cleaner.py", clean_args)
+            else:
+                print("\n▶  [2/3] CLEAN (Skipped - Interval 4h not reached)")
 
-        rc3 = 0
-        if _check_schedule("import", 30):
-            print("\n▶  [3/3] IMPORT (Executed - Interval 30m reached)")
-            rc3 = _run_script("sentinel_import.py")
-        else:
-            print("\n▶  [3/3] IMPORT (Skipped - Interval 30m not reached)")
+            rc3 = 0
+            if _check_schedule("import", 30):
+                print("\n▶  [3/3] IMPORT (Executed - Interval 30m reached)")
+                rc3 = _run_script("sentinel_import.py")
+            else:
+                print("\n▶  [3/3] IMPORT (Skipped - Interval 30m not reached)")
 
-        worst = max(rc1, rc2, rc3)
-        print(f"\n{separator}")
-        print(f"  SeerrSentinel  ›  ALL done (exit codes: {rc1}/{rc2}/{rc3})")
-        print(f"{separator}")
-        sys.exit(worst)
+            return max(rc1, rc2, rc3)
+
+        if args.command == "all":
+            worst = _run_pass(is_daemon=False)
+            print(f"\n{separator}")
+            print(f"  SeerrSentinel  ›  ALL done (exit codes up to {worst})")
+            print(f"{separator}")
+            sys.exit(worst)
+        elif args.command == "daemon":
+            print("Starting daemon mode. Press Ctrl+C to stop.")
+            try:
+                while True:
+                    print(f"\n{separator}")
+                    print(f"  SeerrSentinel  ›  DAEMON PASS AT {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                    print(f"{separator}\n")
+                    _run_pass(is_daemon=True)
+                    print(f"\nSleeping for {args.interval} seconds...")
+                    time.sleep(args.interval)
+            except KeyboardInterrupt:
+                print("\nDaemon stopped by user.")
+                sys.exit(0)
 
 
 if __name__ == "__main__":
