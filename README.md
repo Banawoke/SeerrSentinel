@@ -40,10 +40,22 @@ pip install requests python-dotenv
 
 ## Usage
 
+### Simple
+
 ```bash
 # Check the .env before anything else
 python3 seerr_sentinel.py --check-env
 
+# Run everything in one go (dry-run to test safely first)
+python3 seerr_sentinel.py all --dry-run
+
+# Run everything in one go
+python3 seerr_sentinel.py all
+```
+
+### Step by step
+
+```bash
 # Trigger Radarr/Sonarr searches for missing media
 python3 seerr_sentinel.py search
 
@@ -54,9 +66,6 @@ python3 seerr_sentinel.py clean
 # Video file injection
 python3 seerr_sentinel.py import
 python3 seerr_sentinel.py import --sonarr --force-id 42
-
-# Run all steps in sequence
-python3 seerr_sentinel.py all --dry-run
 ```
 
 Each sub-script can also be run directly:

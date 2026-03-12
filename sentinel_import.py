@@ -232,6 +232,24 @@ class MediaImporter:
             except OSError as e:
                 print(f"  -> [WARN] Failed to chown {path}: {e}")
 
+    def clear_queue_for_item(self, url, api_key, item_id, id_field_name):
+        """Remove any stuck queue entries for this item after successful import."""
+        try:
+            q_url = f"{url}/api/v3/queue"
+            resp = requests.get(q_url, headers={"X-Api-Key": api_key})
+            if resp.status_code != 200:
+                return
+            records = resp.json().get("records", [])
+            for r in records:
+                if r.get(id_field_name) == item_id:
+                    queue_id = r.get("id")
+                    title = r.get("title")
+                    print(f"  -> [CLEANUP] Removing stuck queue item '{title}' as media is now imported.")
+                    del_url = f"{url}/api/v3/queue/{queue_id}"
+                    requests.delete(del_url, params={"removeFromClient": "true", "blocklist": "false"}, headers={"X-Api-Key": api_key})
+        except Exception as e:
+            print(f"  -> [WARN] Error cleaning queue for {id_field_name}={item_id}: {e}")
+
 class RadarrImporter(MediaImporter):
     def __init__(self):
         super().__init__()
@@ -267,6 +285,7 @@ class RadarrImporter(MediaImporter):
             m = resp.json()
             if m.get("hasFile"):
                 print(f"  -> [SUCCESS] Movie '{m['title']}' is now imported!")
+                self.clear_queue_for_item(self.url, self.api_key, movie_id, "movieId")
                 return True
             else:
                 print(f"  -> [FAILURE] Movie '{m['title']}' still missing file.")
@@ -461,7 +480,7 @@ class SonarrImporter(MediaImporter):
 
     def verify_import(self, series_id, injected_episodes):
         """Wait a bit then verify episodes have been imported."""
-        if not injected_episodes: return
+        if not injected_episodes: return False
         time.sleep(5)  # Brief pause for filesystem consistency
         
         try:
@@ -479,9 +498,13 @@ class SonarrImporter(MediaImporter):
             
             if success_count > 0:
                 print(f"  -> [SUCCESS] {success_count}/{len(injected_episodes)} injected episodes are now imported!")
+                self.clear_queue_for_item(self.url, self.api_key, series_id, "seriesId")
+                return True
+            return False
             
         except Exception as e:
             print(f"  -> Verify failed: {e}")
+            return False
 
     def force_injection(self, series_id, source_path, dest_dir, existing_episodes):
         if not os.path.exists(dest_dir):
