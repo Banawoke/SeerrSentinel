@@ -71,8 +71,7 @@ docker run -d \
   -e DOWNLOADS_PATH=/downloads \
   -e PUID=1000 \
   -e PGID=1000 \
-  # -e RELEASE_BUFFER_DAYS=7 \
-  # -e DELETION_DELAY_DAYS=2 \
+  # Other optional variables
   -v /path/to/your/downloads:/downloads \
   ghcr.io/banawoke/seerrsentinel:latest
 ```

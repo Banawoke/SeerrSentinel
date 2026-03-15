@@ -3,17 +3,20 @@
 SeerrSentinel — Central orchestrator and configuration loader.
 
 Usage:
-    python3 seerr_sentinel.py all [--dry-run]
     python3 seerr_sentinel.py --check-env
+    python3 seerr_sentinel.py --health-check
     python3 seerr_sentinel.py search
     python3 seerr_sentinel.py clean [--dry-run]
     python3 seerr_sentinel.py import [--radarr] [--sonarr] [--force-id N]
+    python3 seerr_sentinel.py all [--dry-run]
+    python3 seerr_sentinel.py daemon [--dry-run] [--interval N]
 """
 
 import os
 import sys
 import subprocess
 import argparse
+import requests
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -119,11 +122,172 @@ def _cmd_check_env() -> int:
         return 1
 
 
+def _cmd_health_check(compact: bool = False) -> int:
+    """Actively test connectivity to all configured services.
+
+    compact=True: only print failures/warnings (silent when all OK).
+    compact=False (default): full report with all OK lines.
+    """
+    OK    = "  [  OK  ]"
+    WARN  = "  [ WARN ]"
+    FAIL  = "  [ FAIL ]"
+
+    if not compact:
+        print("SeerrSentinel \u2014 Health Check")
+        print("=" * 52)
+
+    errors   = []
+    warnings = []
+
+    def _get(url, api_key=None, timeout=5):
+        headers = {"X-Api-Key": api_key} if api_key else {}
+        try:
+            r = requests.get(url, headers=headers, timeout=timeout)
+            return r
+        except requests.exceptions.ConnectionError:
+            return None
+        except requests.exceptions.Timeout:
+            return "timeout"
+        except Exception as e:
+            return str(e)
+
+    def _check_arr(name, base_url, api_key, endpoint="/api/v3/system/status"):
+        """Test an *arr API and return (ok, detail_str)."""
+        if not base_url or not api_key:
+            return False, "URL or API key not configured"
+        r = _get(base_url.rstrip("/") + endpoint, api_key=api_key)
+        if r is None:
+            return False, f"Connection refused — is {name} running at {base_url}?"
+        if r == "timeout":
+            return False, f"Timeout after 5 s — {base_url} may be unreachable"
+        if isinstance(r, str):
+            return False, f"Unexpected error: {r}"
+        if r.status_code == 401:
+            return False, f"Authentication failed (HTTP 401) — check your API key"
+        if r.status_code == 403:
+            return False, f"Forbidden (HTTP 403) — API key may have wrong permissions"
+        if r.status_code == 200:
+            try:
+                data = r.json()
+                version = data.get("version", "?")
+                return True, f"Connected   (version {version})  at {base_url}"
+            except Exception:
+                return True, f"Connected  at {base_url}"
+        return False, f"Unexpected HTTP {r.status_code} from {base_url}"
+
+    if not compact:
+        print("\n  Services reachability:")
+
+    # ── Radarr ──────────────────────────────────────────────
+    radarr_url = os.environ.get("RADARR_URL", "").strip()
+    radarr_key = os.environ.get("RADARR_API_KEY", "").strip()
+    ok, detail = _check_arr("Radarr", radarr_url, radarr_key)
+    if ok:
+        if not compact: print(f"{OK}  Radarr  — {detail}")
+    else:
+        print(f"{FAIL}  Radarr  — {detail}")
+        errors.append(f"Radarr: {detail}")
+
+    # ── Sonarr ──────────────────────────────────────────────
+    sonarr_url = os.environ.get("SONARR_URL", "").strip()
+    sonarr_key = os.environ.get("SONARR_API_KEY", "").strip()
+    ok, detail = _check_arr("Sonarr", sonarr_url, sonarr_key)
+    if ok:
+        if not compact: print(f"{OK}  Sonarr  — {detail}")
+    else:
+        print(f"{FAIL}  Sonarr  — {detail}")
+        errors.append(f"Sonarr: {detail}")
+
+    # ── Jellyseerr ──────────────────────────────────────────
+    seerr_url = os.environ.get("JELLYSEER_URL", "").strip()
+    seerr_key = os.environ.get("JELLYSEER_API_KEY", "").strip()
+    ok, detail = _check_arr("Jellyseerr", seerr_url, seerr_key, endpoint="/api/v1/settings/main")
+    if ok:
+        if not compact: print(f"{OK}  Jellyseerr — {detail}")
+    else:
+        print(f"{FAIL}  Jellyseerr — {detail}")
+        errors.append(f"Jellyseerr: {detail}")
+
+    # ── TMDB ────────────────────────────────────────────────
+    tmdb_key = os.environ.get("TMDB_API_KEY", "").strip()
+    if not tmdb_key:
+        print(f"{FAIL}  TMDB    — API key not configured")
+        errors.append("TMDB: API key not configured")
+    else:
+        r = _get(f"https://api.themoviedb.org/3/configuration?api_key={tmdb_key}")
+        if r is None:
+            print(f"{FAIL}  TMDB    — Cannot reach api.themoviedb.org (no internet?)")
+            errors.append("TMDB: Cannot reach api.themoviedb.org")
+        elif r == "timeout":
+            print(f"{FAIL}  TMDB    — Timeout (>5 s) reaching api.themoviedb.org")
+            errors.append("TMDB: Request timed out")
+        elif isinstance(r, str):
+            print(f"{FAIL}  TMDB    — {r}")
+            errors.append(f"TMDB: {r}")
+        elif r.status_code == 401:
+            print(f"{FAIL}  TMDB    — Invalid API key (HTTP 401)")
+            errors.append("TMDB: Invalid API key")
+        elif r.status_code == 200:
+            if not compact: print(f"{OK}  TMDB    — API key valid, TMDB reachable")
+        else:
+            print(f"{FAIL}  TMDB    — Unexpected HTTP {r.status_code}")
+            errors.append(f"TMDB: HTTP {r.status_code}")
+
+    # ── Downloads folder ────────────────────────────────────
+    if not compact:
+        print("\n  Downloads folder:")
+    
+    dl_path = os.environ.get("DOWNLOADS_PATH", "").strip()
+    if not dl_path:
+        print(f"{FAIL}  DOWNLOADS_PATH — not configured")
+        errors.append("DOWNLOADS_PATH not configured")
+    elif not os.path.exists(dl_path):
+        print(f"{FAIL}  {dl_path} — directory does not exist")
+        errors.append(f"Downloads path does not exist: {dl_path}")
+    elif not os.access(dl_path, os.R_OK):
+        print(f"{FAIL}  {dl_path} — directory exists but is not readable")
+        errors.append(f"Downloads path not readable: {dl_path}")
+    else:
+        contents = list(Path(dl_path).iterdir())
+        if not contents:
+            print(f"{WARN}  {dl_path} — directory is empty (nothing to import yet)")
+            warnings.append(f"Downloads path is empty: {dl_path}")
+        else:
+            if not compact: print(f"{OK}  {dl_path} — OK ({len(contents)} entries)")
+
+    # ── Summary ─────────────────────────────────────────────
+    if errors or warnings or not compact:
+        print("\n" + "=" * 52)
+        
+    if errors:
+        print(f"  RESULT: {len(errors)} error(s) detected — SeerrSentinel may not work correctly\n")
+        for e in errors:
+            print(f"    ✗ {e}")
+        if warnings:
+            print()
+            for w in warnings:
+                print(f"    ⚠ {w}")
+        print()
+        return 1
+    elif warnings:
+        print(f"  RESULT: All services reachable — {len(warnings)} warning(s)\n")
+        for w in warnings:
+            print(f"    ⚠ {w}")
+        print()
+        return 2
+    else:
+        if not compact:
+            print("  RESULT: All checks passed — SeerrSentinel is ready ✓\n")
+        return 0
+
+
 def _run_script(script_name: str, extra_args: list = None) -> int:
     """Run a sub-script from the same directory via subprocess."""
     script_path = Path(__file__).parent / script_name
+    env = os.environ.copy()
+    env["_SEERRSENTINEL_INTERNAL"] = "1"
     cmd = [sys.executable, str(script_path)] + (extra_args or [])
-    result = subprocess.run(cmd)
+    result = subprocess.run(cmd, env=env)
     return result.returncode
 
 
@@ -134,17 +298,24 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  seerr_sentinel.py --check-env\n"
-            "  seerr_sentinel.py search\n"
-            "  seerr_sentinel.py clean --dry-run\n"
-            "  seerr_sentinel.py import --sonarr --force-id 42\n"
-            "  seerr_sentinel.py all --dry-run\n"
+            "  seerr_sentinel.py --check-env          # Check .env variables\n"
+            "  seerr_sentinel.py --health-check       # Test connectivity to all services\n"
+            "  seerr_sentinel.py search               # Trigger missing media search\n"
+            "  seerr_sentinel.py clean --dry-run      # Preview cleanup without deleting\n"
+            "  seerr_sentinel.py import               # Inject downloaded files\n"
+            "  seerr_sentinel.py all --dry-run        # Run all steps once\n"
+            "  seerr_sentinel.py daemon --interval 60 # Run as a background daemon\n"
         ),
     )
     parser.add_argument(
         "--check-env",
         action="store_true",
         help="Check environment variables and exit",
+    )
+    parser.add_argument(
+        "--health-check",
+        action="store_true",
+        help="Test connectivity to all services (Radarr, Sonarr, TMDB, Jellyseerr) and exit",
     )
 
     subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
@@ -211,6 +382,9 @@ def main() -> None:
     if args.check_env:
         sys.exit(_cmd_check_env())
 
+    if args.health_check:
+        sys.exit(_cmd_health_check())
+
     if not args.command:
         parser.print_help()
         sys.exit(0)
@@ -222,13 +396,19 @@ def main() -> None:
     print(f"{separator}\n")
 
     if args.command == "search":
+        rc = _cmd_health_check(compact=True)
+        if rc == 1: sys.exit(1)
         sys.exit(_run_script("sentinel_search.py"))
 
     elif args.command == "clean":
+        rc = _cmd_health_check(compact=True)
+        if rc == 1: sys.exit(1)
         extra = ["--dry-run"] if args.dry_run else []
         sys.exit(_run_script("sentinel_cleaner.py", extra))
 
     elif args.command == "import":
+        rc = _cmd_health_check(compact=True)
+        if rc == 1: sys.exit(1)
         extra = []
         if args.radarr:
             extra.append("--radarr")
@@ -323,12 +503,23 @@ def main() -> None:
             return max(rc1, rc2, rc3), True
 
         if args.command == "all":
+            rc = _cmd_health_check(compact=True)
+            if rc == 1: sys.exit(1)
             worst, _ = _run_pass(is_daemon=False)
             print(f"\n{separator}")
             print(f"  SeerrSentinel  ›  ALL done (exit codes up to {worst})")
             print(f"{separator}")
             sys.exit(worst)
         elif args.command == "daemon":
+            print("Starting SeerrSentinel in daemon mode...")
+            print(f"Interval: {args.interval}s between cycles. Press Ctrl+C to stop.\n")
+            # Run health check once at startup — abort on critical errors
+            print("--- Startup Health Check ---")
+            hc_rc = _cmd_health_check(compact=True)
+            if hc_rc == 1:
+                print("\nCritical health check failure. Daemon will not start.")
+                sys.exit(1)
+            print("--- Health Check OK. Daemon started.\n")
             try:
                 while True:
                     _run_pass(is_daemon=True)

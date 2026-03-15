@@ -145,6 +145,49 @@ class MediaImporter:
         self.tmdb_cache[cache_key] = aliases
         return aliases
 
+    def is_released_tmdb(self, tmdb_id, media_type):
+        """
+        Check TMDB to see if the movie/show is released today or earlier.
+        media_type: 'tv' or 'movie'
+        """
+        if not tmdb_id or not self.tmdb_key:
+            return True
+            
+        cache_key = f"status_{media_type}_{tmdb_id}"
+        if cache_key in self.tmdb_cache:
+            return self.tmdb_cache[cache_key]
+
+        import datetime
+        now_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+        is_released = True
+        
+        try:
+            url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}?api_key={self.tmdb_key}"
+            resp = requests.get(url, timeout=5)
+            if resp.status_code == 200:
+                data = resp.json()
+                status = data.get("status")
+                
+                if media_type == 'movie':
+                    if status and status.lower() in ["planned", "in production", "post production"]:
+                        is_released = False
+                    else:
+                        release_date = data.get("release_date")
+                        if release_date and release_date > now_str:
+                            is_released = False
+                else: # 'tv'
+                    if status and status.lower() in ["planned", "in production"]:
+                         is_released = False
+                    else:
+                        first_air_date = data.get("first_air_date")
+                        if first_air_date and first_air_date > now_str:
+                            is_released = False
+        except Exception as e:
+            pass
+
+        self.tmdb_cache[cache_key] = is_released
+        return is_released
+
     def get_downloads_content(self):
         content = []
         if os.path.exists(self.downloads_path):
@@ -354,6 +397,12 @@ class RadarrImporter(MediaImporter):
 
         for m in missing_movies:
             if m['id'] in processed_ids: continue
+
+            tmdb_id = m.get("tmdbId")
+            if tmdb_id and not self.is_released_tmdb(tmdb_id, 'movie'):
+                print(f"{m['title']} (TMDB ID: {tmdb_id}) -> Skipped (Not released yet on TMDB)")
+                processed_ids.add(m['id'])
+                continue
 
             # Build Check List
             titles = {m["title"], m.get("originalTitle"), m.get("cleanTitle")}
@@ -612,6 +661,11 @@ class SonarrImporter(MediaImporter):
         video_files = [i["path"] for i in disk_items if i["type"] == "file" and i["name"].lower().endswith(('.mkv', '.mp4', '.avi'))]
 
         for s in missing:
+            tmdb_id = s.get("tmdbId")
+            if tmdb_id and not self.is_released_tmdb(tmdb_id, 'tv'):
+                print(f"{s['title']} (TMDB ID: {tmdb_id}) -> Skipped (Not released yet on TMDB)")
+                continue
+
             titles = {s["title"], s.get("cleanTitle")}
             if ":" in s["title"]: titles.add(s["title"].split(":")[0].strip())
             no_year = re.sub(r'\(\d{4}\)', '', s["title"]).strip()
@@ -682,6 +736,11 @@ class SonarrImporter(MediaImporter):
                 print(f"{s['title']} (TMDB ID: {s.get('tmdbId', '?')}) -> No match found on disk")
 
 if __name__ == "__main__":
+    if not os.environ.get("_SEERRSENTINEL_INTERNAL"):
+        print("Error: This script cannot be run directly.")
+        print("Use:  python3 seerr_sentinel.py import [--radarr] [--sonarr] [--force-id N]")
+        sys.exit(1)
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--radarr", action="store_true")
     parser.add_argument("--sonarr", action="store_true")
@@ -691,7 +750,7 @@ if __name__ == "__main__":
     run_all = not args.radarr and not args.sonarr
 
     if run_all or args.radarr:
-        RadarrImporter().run() # Radarr doesn't support force_id yet in this impl but fine
+        RadarrImporter().run()
     
     if run_all or args.sonarr:
         SonarrImporter().run(force_id=args.force_id)

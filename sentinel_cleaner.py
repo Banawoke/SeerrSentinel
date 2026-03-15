@@ -854,6 +854,11 @@ def generate_missing_media_report(dry_run=False):
             print("\nNo media ready for deletion.")
 
 if __name__ == "__main__":
+    if not os.environ.get("_SEERRSENTINEL_INTERNAL"):
+        print("Error: This script cannot be run directly.")
+        print("Use:  python3 seerr_sentinel.py clean [--dry-run]")
+        sys.exit(1)
+
     args = parse_command_line_arguments()
     
     print("--- Cleaning Stuck Downloads ---")

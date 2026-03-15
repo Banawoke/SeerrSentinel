@@ -722,6 +722,11 @@ def process_sonarr(series_map=None):
         return False
 
 if __name__ == "__main__":
+    if not os.environ.get("_SEERRSENTINEL_INTERNAL"):
+        print("Error: This script cannot be run directly.")
+        print("Use:  python3 seerr_sentinel.py search")
+        sys.exit(1)
+
     print(f"--- SeerrSentinel Search Run: {datetime.now()} ---")
     
     # Global Lock Check
