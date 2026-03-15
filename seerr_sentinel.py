@@ -329,8 +329,6 @@ def main() -> None:
             print(f"{separator}")
             sys.exit(worst)
         elif args.command == "daemon":
-            print("Starting daemon mode. Press Ctrl+C to stop.")
-            print("(Logs are currently suppressed when idle to keep things clean)")
             try:
                 while True:
                     _run_pass(is_daemon=True)
