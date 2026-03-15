@@ -41,12 +41,15 @@ services:
       - DOWNLOADS_PATH=/downloads
       - PUID=1000
       - PGID=1000
-      # Optional variables
       # - RELEASE_BUFFER_DAYS=7
       # - DELETION_DELAY_DAYS=2
       # - KEEP_REQUESTS_OLDER_THAN_DAYS=14
       # - STUCK_DOWNLOAD_MINUTES=20.0
       # - MAX_DOWNLOAD_HOURS=6.0
+      # - DAEMON_INTERVAL_SECONDS=60
+      # - SEARCH_INTERVAL_MINUTES=15
+      # - IMPORT_INTERVAL_MINUTES=30
+      # - CLEAN_INTERVAL_MINUTES=240
     volumes:
       - /path/to/your/downloads:/downloads
 ```
@@ -93,17 +96,20 @@ pip install -r requirements.txt
 
 3. **Check your configuration**
 ```bash
-python3 seerr_sentinel.py --check-env
+python3 seerr_sentinel.py --health-check
 ```
 
 ## Usage
 
 ### Docker (Daemon Mode)
 
-When using the Docker image, the script automatically runs in `daemon` mode. It stays alive in the background and handles its own schedule:
-- **Search**: every 15 minutes
-- **Import**: every 30 minutes
-- **Clean**: every 4 hours
+When using the Docker image, the script automatically runs in `daemon` mode. It stays alive in the background and handles its own schedule.
+These intervals are customizable via environment variables (defaults shown below):
+- **Search**: every 15 minutes (`SEARCH_INTERVAL_MINUTES`)
+- **Import**: every 30 minutes (`IMPORT_INTERVAL_MINUTES`)
+- **Clean**: every 4 hours (`CLEAN_INTERVAL_MINUTES`)
+
+The daemon checks the timers every 60 seconds (`DAEMON_INTERVAL_SECONDS`).
 
 You can check everything it does in real-time by reading the logs:
 ```bash
@@ -123,8 +129,8 @@ If you are running the scripts manually:
 #### Simple
 
 ```bash
-# Check the .env before anything else
-python3 seerr_sentinel.py --check-env
+# Check your environment setup before anything else
+python3 seerr_sentinel.py --health-check
 
 # Run everything in one go (dry-run to test safely first)
 python3 seerr_sentinel.py all --dry-run
@@ -148,14 +154,6 @@ python3 seerr_sentinel.py import
 python3 seerr_sentinel.py import --sonarr --force-id 42
 ```
 
-Each sub-script can also be run directly:
-
-```bash
-python3 sentinel_cleaner.py --dry-run
-python3 sentinel_search.py
-python3 sentinel_import.py --radarr
-```
-
 ## Configuration (`.env`)
 
 | Variable | Required | Description |
@@ -175,6 +173,10 @@ python3 sentinel_import.py --radarr
 | `KEEP_REQUESTS_OLDER_THAN_DAYS` | optional | Keep Jellyseerr requests older than N days (default: `14`) |
 | `STUCK_DOWNLOAD_MINUTES` | optional | Minutes to wait before removing a download with <= 5% progress (default: `20.0`) |
 | `MAX_DOWNLOAD_HOURS` | optional | Maximum hours before a download is removed regardless of progress (default: `6.0`) |
+| `DAEMON_INTERVAL_SECONDS` | optional | How often the background daemon checks the timers (default: `60`) |
+| `SEARCH_INTERVAL_MINUTES` | optional | How frequently the search module runs (default: `15`) |
+| `IMPORT_INTERVAL_MINUTES` | optional | How frequently the import module runs (default: `30`) |
+| `CLEAN_INTERVAL_MINUTES` | optional | How frequently the clean module runs (default: `240`) |
 
 ## Architecture
 
@@ -187,7 +189,7 @@ seerr_sentinel.py          ← orchestrator + load_config() + scheduling
 
 ### `seerr_sentinel.py all` and `daemon` logic
 
-When running the `all` command (or the Docker `daemon` mode), the script manages its own sub-intervals via a lightweight local JSON cache:
+When running the `all` command (or the `daemon` mode), the script manages its own sub-intervals via a lightweight local JSON cache. By default these are the timers (which can be overriden via `.env` variables):
 - **Search**: Executes only every 15 min.
 - **Import**: Executes only if 30 minutes have passed since the last run.
 - **Clean**: Executes only if 4 hours have passed since the last run.
@@ -213,11 +215,3 @@ When running the `all` command (or the Docker `daemon` mode), the script manages
 2. Matches files against missing media using title tokens + TMDB aliases
 3. Creates hard-links in Radarr/Sonarr media folders
 4. Triggers a `RescanMovie` / `RescanSeries` and waits for confirmation
-
-## Use case example
-
-### Manual Cronjob (if not using Docker daemon)
-
-```cron
-*/15 * * * *  python3 /seerr_sentinel/seerr_sentinel.py all
-```

@@ -145,48 +145,47 @@ class MediaImporter:
         self.tmdb_cache[cache_key] = aliases
         return aliases
 
-    def is_released_tmdb(self, tmdb_id, media_type):
+    def is_released(self, item_type, item):
         """
-        Check TMDB to see if the movie/show is released today or earlier.
-        media_type: 'tv' or 'movie'
+        Determines if the media item is currently released based on available dates.
+        Returns True if at least one release date is in the past.
+        Returns False if all known future dates are in the future, or no dates are present.
         """
-        if not tmdb_id or not self.tmdb_key:
-            return True
-            
-        cache_key = f"status_{media_type}_{tmdb_id}"
-        if cache_key in self.tmdb_cache:
-            return self.tmdb_cache[cache_key]
-
-        import datetime
-        now_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
-        is_released = True
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
         
-        try:
-            url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}?api_key={self.tmdb_key}"
-            resp = requests.get(url, timeout=5)
-            if resp.status_code == 200:
-                data = resp.json()
-                status = data.get("status")
+        if item_type == "movie":
+            fields = ["digitalRelease", "physicalRelease", "releaseDate"]
+            has_any_date = False
+            
+            for f in fields:
+                date_str = item.get(f)
+                if date_str:
+                    has_any_date = True
+                    try:
+                        dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+                        if dt <= now:
+                            return True # Found a date in the past, it's released
+                    except ValueError:
+                        pass
+            
+            if not has_any_date:
+                return item.get("status") == "released"
                 
-                if media_type == 'movie':
-                    if status and status.lower() in ["planned", "in production", "post production"]:
-                        is_released = False
-                    else:
-                        release_date = data.get("release_date")
-                        if release_date and release_date > now_str:
-                            is_released = False
-                else: # 'tv'
-                    if status and status.lower() in ["planned", "in production"]:
-                         is_released = False
-                    else:
-                        first_air_date = data.get("first_air_date")
-                        if first_air_date and first_air_date > now_str:
-                            is_released = False
-        except Exception as e:
-            pass
+            return False # Has dates, but all are in the future
 
-        self.tmdb_cache[cache_key] = is_released
-        return is_released
+        elif item_type == "episode":
+            air_date_str = item.get("airDateUtc")
+            if air_date_str:
+                try:
+                    dt = datetime.fromisoformat(air_date_str.replace("Z", "+00:00"))
+                    if dt > now:
+                        return False # Future air date
+                except ValueError:
+                    pass
+            return True # Default to True if no date or date is past
+
+        return True
 
     def get_downloads_content(self):
         content = []
@@ -386,23 +385,23 @@ class RadarrImporter(MediaImporter):
         
         if not missing_movies: return
 
-        # List all missing movies
+        released_movies = []
         for m in missing_movies:
-            print(f"  - {m['title']} (ID: {m.get('tmdbId', '?')}, Year: {m.get('year', '?')})")
+            if not self.is_released("movie", m):
+                print(f"  ~ {m['title']} -> Skipped (Not released yet)")
+            else:
+                released_movies.append(m)
+                print(f"  - {m['title']} (ID: {m.get('tmdbId', '?')}, Year: {m.get('year', '?')})")
+
+        if not released_movies: return
 
         disk_items = self.get_downloads_content()
         video_files = [i["path"] for i in disk_items if i["type"] == "file" and i["name"].lower().endswith(('.mkv', '.mp4', '.avi'))]
 
         processed_ids = set()
 
-        for m in missing_movies:
+        for m in released_movies:
             if m['id'] in processed_ids: continue
-
-            tmdb_id = m.get("tmdbId")
-            if tmdb_id and not self.is_released_tmdb(tmdb_id, 'movie'):
-                print(f"{m['title']} (TMDB ID: {tmdb_id}) -> Skipped (Not released yet on TMDB)")
-                processed_ids.add(m['id'])
-                continue
 
             # Build Check List
             titles = {m["title"], m.get("originalTitle"), m.get("cleanTitle")}
@@ -661,10 +660,8 @@ class SonarrImporter(MediaImporter):
         video_files = [i["path"] for i in disk_items if i["type"] == "file" and i["name"].lower().endswith(('.mkv', '.mp4', '.avi'))]
 
         for s in missing:
-            tmdb_id = s.get("tmdbId")
-            if tmdb_id and not self.is_released_tmdb(tmdb_id, 'tv'):
-                print(f"{s['title']} (TMDB ID: {tmdb_id}) -> Skipped (Not released yet on TMDB)")
-                continue
+            # Series/Episode level checks are not robust enough here right now, 
+            # and TMDB caused false negatives. Removed TMDB skip for Sonarr.
 
             titles = {s["title"], s.get("cleanTitle")}
             if ":" in s["title"]: titles.add(s["title"].split(":")[0].strip())

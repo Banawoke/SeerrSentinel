@@ -174,19 +174,28 @@ def get_tmdb_title(tmdb_id, tmdb_api_key, media_type="movie"):
     return title
 
 def fetch_jellyseerr_requests(api_key, base_url):
-    take = 10
+    take = 50
     skip = 0
     headers = {"X-Api-Key": api_key}
     requests_list = []
     seen_tmdb = set()
+    total_results = None
 
-    url = f"{base_url}/api/v1/request?sort=added&sortDirection=desc&skip={skip}&take={take}"
-    response = requests.get(url, headers=headers)
-    response.raise_for_status()
-    data = response.json()
+    while True:
+        url = f"{base_url}/api/v1/request?filter=unavailable&sort=added&sortDirection=desc&skip={skip}&take={take}"
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        data = response.json()
+        
+        page_info = data.get("pageInfo", {})
+        if total_results is None:
+            total_results = page_info.get("results", 0)
 
-    if data.get("results"):
-        for item in data["results"]:
+        results = data.get("results", [])
+        if not results:
+            break
+
+        for item in results:
             media = item.get("media", {})
             tmdb_id = media.get("tmdbId")
             if not tmdb_id or tmdb_id in seen_tmdb:
@@ -216,6 +225,10 @@ def fetch_jellyseerr_requests(api_key, base_url):
                     "requested_by": requester,
                 }
             )
+            
+        skip += take
+        if skip >= total_results:
+            break
 
     return requests_list
 
@@ -692,7 +705,7 @@ def generate_missing_media_report(dry_run=False):
         )
 
     print("--- Jellyseerr Media ---")
-    print("Recent media found in requests:")
+    print("Unfulfilled media found in requests:")
     if jellyseerr_requests:
         for movie in jellyseerr_requests:
             print(f"- {movie['title']} (ID: {movie['media_id']}, TMDB ID: {movie['tmdb_id']})")

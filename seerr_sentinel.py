@@ -3,7 +3,6 @@
 SeerrSentinel — Central orchestrator and configuration loader.
 
 Usage:
-    python3 seerr_sentinel.py --check-env
     python3 seerr_sentinel.py --health-check
     python3 seerr_sentinel.py search
     python3 seerr_sentinel.py clean [--dry-run]
@@ -53,6 +52,10 @@ _ALL_OPTIONAL_VARS = {
     "KEEP_REQUESTS_OLDER_THAN_DAYS": "14",
     "STUCK_DOWNLOAD_MINUTES": "20.0",
     "MAX_DOWNLOAD_HOURS": "6.0",
+    "DAEMON_INTERVAL_SECONDS": "60",
+    "SEARCH_INTERVAL_MINUTES": "15",
+    "CLEAN_INTERVAL_MINUTES": "240",
+    "IMPORT_INTERVAL_MINUTES": "30",
 }
 
 
@@ -88,40 +91,6 @@ def load_config(required: list) -> dict:
 # CLI — Commands
 # ---------------------------------------------------------------------------
 
-def _cmd_check_env() -> int:
-    """Display the status of all known environment variables."""
-    print("SeerrSentinel — Environment check")
-    print("=" * 52)
-
-    all_ok = True
-
-    print("\n Required variables:")
-    for var in _ALL_REQUIRED_VARS:
-        value = os.environ.get(var, "").strip()
-        if value:
-            display = value[:10] + "…" if "KEY" in var else value
-            print(f"     {var:<35} = {display}")
-        else:
-            print(f"     {var:<35} — MISSING")
-            all_ok = False
-
-    print("\n Optional variables (default values used if absent):")
-    for var, default in _ALL_OPTIONAL_VARS.items():
-        value = os.environ.get(var, "")
-        if value:
-            print(f"     {var:<35} = {value}")
-        else:
-            print(f"     {var:<35} — (default: {default})")
-
-    print()
-    if all_ok:
-        print("Environment complete. SeerrSentinel is ready.\n")
-        return 0
-    else:
-        print("Some variables are missing. Please complete the .env file.\n")
-        return 1
-
-
 def _cmd_health_check(compact: bool = False) -> int:
     """Actively test connectivity to all configured services.
 
@@ -132,12 +101,32 @@ def _cmd_health_check(compact: bool = False) -> int:
     WARN  = "  [ WARN ]"
     FAIL  = "  [ FAIL ]"
 
-    if not compact:
-        print("SeerrSentinel \u2014 Health Check")
-        print("=" * 52)
-
     errors   = []
     warnings = []
+
+    if not compact:
+        print("SeerrSentinel \u2014 Health Check & Environment")
+        print("=" * 52)
+
+        print("\n  Environment variables:")
+        all_ok = True
+        for var in _ALL_REQUIRED_VARS:
+            value = os.environ.get(var, "").strip()
+            if value:
+                display = value[:10] + "…" if "KEY" in var else value
+                print(f"     {var:<35} = {display}")
+            else:
+                print(f"     {var:<35} — {FAIL} MISSING")
+                all_ok = False
+                errors.append(f"Missing required environment variable: {var}")
+
+        for var, default in _ALL_OPTIONAL_VARS.items():
+            value = os.environ.get(var, "")
+            if value:
+                print(f"     {var:<35} = {value}")
+            else:
+                print(f"     {var:<35} — (default: {default})")
+
 
     def _get(url, api_key=None, timeout=5):
         headers = {"X-Api-Key": api_key} if api_key else {}
@@ -298,8 +287,7 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  seerr_sentinel.py --check-env          # Check .env variables\n"
-            "  seerr_sentinel.py --health-check       # Test connectivity to all services\n"
+            "  seerr_sentinel.py --health-check       # Test connectivity and show env variables\n"
             "  seerr_sentinel.py search               # Trigger missing media search\n"
             "  seerr_sentinel.py clean --dry-run      # Preview cleanup without deleting\n"
             "  seerr_sentinel.py import               # Inject downloaded files\n"
@@ -308,14 +296,9 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--check-env",
-        action="store_true",
-        help="Check environment variables and exit",
-    )
-    parser.add_argument(
         "--health-check",
         action="store_true",
-        help="Test connectivity to all services (Radarr, Sonarr, TMDB, Jellyseerr) and exit",
+        help="Test connectivity to all services (Radarr, Sonarr, TMDB, Jellyseerr) and show environment variables and exit",
     )
 
     subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
@@ -368,7 +351,7 @@ def _build_parser() -> argparse.ArgumentParser:
     daemon_p.add_argument(
         "--interval",
         type=int,
-        default=60,
+        default=int(os.environ.get("DAEMON_INTERVAL_SECONDS", "60")),
         help="Wait time in seconds between loops",
     )
 
@@ -378,9 +361,6 @@ def _build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
-
-    if args.check_env:
-        sys.exit(_cmd_check_env())
 
     if args.health_check:
         sys.exit(_cmd_health_check())
@@ -463,11 +443,15 @@ def main() -> None:
         def _run_pass(is_daemon=False):
             rc1 = rc2 = rc3 = 0
 
+            s_interval = int(os.environ.get("SEARCH_INTERVAL_MINUTES", "15"))
+            c_interval = int(os.environ.get("CLEAN_INTERVAL_MINUTES", "240"))
+            i_interval = int(os.environ.get("IMPORT_INTERVAL_MINUTES", "30"))
+
             # In 'all' (manual / cron), SEARCH runs unconditionally.
-            # In 'daemon', SEARCH runs every 15 minutes.
-            run_search = not is_daemon or _should_run("search", 15)
-            run_clean = _should_run("clean", 240)
-            run_import = _should_run("import", 30)
+            # In 'daemon', SEARCH runs based on the loaded interval.
+            run_search = not is_daemon or _should_run("search", s_interval)
+            run_clean = _should_run("clean", c_interval)
+            run_import = _should_run("import", i_interval)
 
             # Silently skip if there's nothing to do in daemon mode
             if is_daemon and not (run_search or run_clean or run_import):
@@ -479,26 +463,26 @@ def main() -> None:
                 print(f"{separator}\n")
 
             if run_search:
-                print("▶  [1/3] SEARCH (Executed)")
+                print(f"▶  [1/3] SEARCH (Executed)")
                 _update_run("search")
                 rc1 = _run_script("sentinel_search.py")
             elif not is_daemon:
-                print("▶  [1/3] SEARCH (Skipped - Interval 15m not reached)")
+                print(f"▶  [1/3] SEARCH (Skipped - Interval {s_interval}m not reached)")
 
             if run_clean:
-                print("\n▶  [2/3] CLEAN (Executed)")
+                print(f"\n▶  [2/3] CLEAN (Executed)")
                 _update_run("clean")
                 clean_args = ["--dry-run"] if args.dry_run else []
                 rc2 = _run_script("sentinel_cleaner.py", clean_args)
             elif not is_daemon:
-                print("\n▶  [2/3] CLEAN (Skipped - Interval 4h not reached)")
+                print(f"\n▶  [2/3] CLEAN (Skipped - Interval {c_interval}m not reached)")
 
             if run_import:
-                print("\n▶  [3/3] IMPORT (Executed)")
+                print(f"\n▶  [3/3] IMPORT (Executed)")
                 _update_run("import")
                 rc3 = _run_script("sentinel_import.py")
             elif not is_daemon:
-                print("\n▶  [3/3] IMPORT (Skipped - Interval 30m not reached)")
+                print(f"\n▶  [3/3] IMPORT (Skipped - Interval {i_interval}m not reached)")
 
             return max(rc1, rc2, rc3), True
 
