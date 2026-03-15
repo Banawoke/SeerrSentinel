@@ -288,12 +288,12 @@ def _build_parser() -> argparse.ArgumentParser:
         epilog=(
             "Examples:\n"
             "  seerr_sentinel.py --health-check       # Test connectivity and show env variables\n"
+            "  seerr_sentinel.py all --dry-run        # Run all steps once for testing (no changes made)\n"
+            "  seerr_sentinel.py daemon --interval 60 # Run as a background daemon all steps\n"
+            "  seerr_sentinel.py all                  # Run all steps once\n"
             "  seerr_sentinel.py search               # Trigger missing media search\n"
             "  seerr_sentinel.py clean --dry-run      # Preview cleanup without deleting\n"
-            "  seerr_sentinel.py import               # Inject downloaded files\n"
-            "  seerr_sentinel.py all --dry-run        # Run all steps once\n"
-            "  seerr_sentinel.py daemon --interval 60 # Run as a background daemon\n"
-        ),
+            "  seerr_sentinel.py import               # Inject downloaded files\n"        ),
     )
     parser.add_argument(
         "--health-check",
