@@ -28,19 +28,19 @@ RADARR_URL = _cfg["RADARR_URL"]
 SONARR_API_KEY = _cfg["SONARR_API_KEY"]
 SONARR_URL = _cfg["SONARR_URL"]
 HISTORY_FILE = "/tmp/force_search_history.json"
-COOLDOWN_REQUEST_MINUTES = 10
+COOLDOWN_REQUEST_MINUTES = 15
 COOLDOWN_DOWNLOAD_MINUTES = 10
 
 
-# Cycle Configuration
+# Cycle Configuration (12h Quotas per content)
 MOVIE_CYCLE_HOURS = 12
 MOVIE_MAX_SEARCHES = 6
 
 SEASON_CYCLE_HOURS = 12
-SEASON_MAX_SEARCHES = 3
+SEASON_MAX_SEARCHES = 6
 
 EPISODE_CYCLE_HOURS = 12
-EPISODE_MAX_SEARCHES = 3
+EPISODE_MAX_SEARCHES = 4
 
 
 def load_history():
@@ -145,22 +145,77 @@ def record_search(key, search_type, item_type="movie", title=None):
     if reset_cycle:
         entry["cycle_start"] = now_iso
         entry["count"] = 1
+        entry["fail_count"] = 0  # Reset fail counter on new cycle
     else:
         entry["count"] = entry.get("count", 0) + 1
 
     entry["last_search"] = now_iso
-    entry["type"] = search_type # Store the specific search command name
+    entry["next_search"] = (now + timedelta(minutes=COOLDOWN_REQUEST_MINUTES)).isoformat()
+    entry["type"] = search_type
     
     if title:
         entry["title"] = title
 
     save_history(history)
-    print(f"Recorded {search_type} for {key} ({title}) - Cycle Count: {entry['count']}")
+    _, max_s = get_cycle_config(item_type)
+    next_dt = now + timedelta(minutes=COOLDOWN_REQUEST_MINUTES)
+    cycle_end_dt = datetime.fromisoformat(entry["cycle_start"]) + timedelta(hours=get_cycle_config(item_type)[0])
+    print(f"  [RECORDED] {search_type} | {title}")
+    print(f"             Cycle: {entry['count']}/{max_s} | Fails: {entry.get('fail_count', 0)} | Next search at {next_dt.strftime('%H:%M')} | Cycle resets at {cycle_end_dt.strftime('%H:%M')}")
+
+
+def record_search_failed(key, title=None):
+    """Increment the fail counter when a search returned no results."""
+    history = load_history()
+    if key not in history:
+        return  # Never searched, nothing to fail
+    entry = history[key]
+    entry["fail_count"] = entry.get("fail_count", 0) + 1
+    if title and "title" not in entry:
+        entry["title"] = title
+    save_history(history)
+    print(f"  [FAIL] Previous search found nothing for '{title or key}' → fail_count now {entry['fail_count']}")
+
+
+def mark_failed_if_previous_search(key, title=None):
+    """
+    If the item has a recorded search in history AND it still appears in
+    wanted/missing (caller's responsibility to only call this when that's true),
+    the previous search clearly returned nothing → increment fail_count.
+    Does nothing if this is the first time we see this item.
+    """
+    history = load_history()
+    entry = history.get(key, {})
+    if entry.get("last_search"):  # Was searched before → previous attempt failed
+        record_search_failed(key, title=title)
+
+
+def get_fail_count(key):
+    history = load_history()
+    return history.get(key, {}).get("fail_count", 0)
+
 
 def get_last_search_timestamp(key):
     history = load_history()
     entry = history.get(key, {})
     return entry.get("last_search")
+
+
+def get_next_search_time(key):
+    """Returns (next_search_iso, minutes_remaining) or (None, 0) if ready."""
+    history = load_history()
+    next_iso = history.get(key, {}).get("next_search")
+    if not next_iso:
+        return None, 0
+    try:
+        next_dt = datetime.fromisoformat(next_iso)
+        if next_dt.tzinfo is None:
+            next_dt = next_dt.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        remaining = (next_dt - now).total_seconds() / 60
+        return next_iso, max(0.0, remaining)
+    except ValueError:
+        return None, 0
 
 
 def is_released(item_type, item):
@@ -255,7 +310,8 @@ def is_episode_deleted_in_history(series_id, episode_id):
     return episode_id in _sonarr_history_cache[series_id]
 # -------------------------------------------------------------
 
-def get_sonarr_series_map():
+def get_sonarr_series_data():
+    """Returns a dict {series_id: {title: str, seasons: {num: total_count}}}"""
     if not SONARR_API_KEY or not SONARR_URL:
         return {}
     try:
@@ -263,12 +319,30 @@ def get_sonarr_series_map():
         resp = requests.get(url, headers={"X-Api-Key": SONARR_API_KEY})
         resp.raise_for_status()
         series_list = resp.json()
-        return {s["id"]: s["title"] for s in series_list}
+        
+        data = {}
+        for s in series_list:
+            s_id = s["id"]
+            seasons_info = {}
+            for season in s.get("seasons", []):
+                s_num = season.get("seasonNumber")
+                stats = season.get("statistics", {})
+                seasons_info[s_num] = {
+                    "totalEpisodeCount": stats.get("totalEpisodeCount", 0),
+                    "episodeFileCount": stats.get("episodeFileCount", 0),
+                    "episodeCount": stats.get("episodeCount", 0),
+                }
+            
+            data[s_id] = {
+                "title": s["title"],
+                "seasons": seasons_info
+            }
+        return data
     except Exception as e:
-        print(f"Error fetching Sonarr series map: {e}")
+        print(f"Error fetching Sonarr series data: {e}")
         return {}
 
-def list_missing_content(series_map=None):
+def list_missing_content(series_data=None):
     print("\n--- Missing Content Summary ---")
     
     # Radarr Summary
@@ -308,8 +382,8 @@ def list_missing_content(series_map=None):
             
     # Sonarr Summary
     if SONARR_API_KEY and SONARR_URL:
-        if series_map is None:
-             series_map = get_sonarr_series_map()
+        if series_data is None:
+             series_data = get_sonarr_series_data()
              
         try:
             url = f"{SONARR_URL}/api/v3/wanted/missing?sortKey=airDateUtc&sortDirection=ascending&pageSize=1000"
@@ -324,7 +398,8 @@ def list_missing_content(series_map=None):
             
             for ep in episodes:
                 s_id = ep.get("seriesId")
-                s_title = series_map.get(s_id) or ep.get("series", {}).get("title", f"Series {s_id}")
+                s_info = series_data.get(s_id) or {}
+                s_title = s_info.get("title") or ep.get("series", {}).get("title", f"Series {s_id}")
 
                 if not is_released("episode", ep):
                     if s_title not in unreleased_stats:
@@ -364,7 +439,8 @@ def list_missing_content(series_map=None):
 
 def check_active_commands(base_url, api_key, command_names):
     """
-    Checks if any of the specified commands are currently running or started < 10 mins ago.
+    Checks if any of the specified commands are actively running (started < 10 mins ago
+    AND not yet completed/failed).
     """
     try:
         url = f"{base_url}/api/v3/command"
@@ -373,24 +449,28 @@ def check_active_commands(base_url, api_key, command_names):
         commands = resp.json()
         
         now = datetime.now(timezone.utc)
+        # Terminal statuses — these are done, don't block
+        DONE_STATUSES = {"completed", "failed", "aborted", "cancelled"}
         
         for cmd in commands:
-            if cmd.get("name") in command_names:
-                started_str = cmd.get("started")
-                if started_str:
-                    # Parse timestamp (handle Z for UTC)
-                    try:
-                        started_dt = datetime.fromisoformat(started_str.replace("Z", "+00:00"))
-                        if (now - started_dt) < timedelta(minutes=COOLDOWN_DOWNLOAD_MINUTES):
-                            status = cmd.get("status", "unknown")
-                            print(f"Skipping: Active/Recent {cmd['name']} detected (Status: {status}, Started: {started_str}).")
-                            return True # Busy
-                    except ValueError:
-                        pass # Ignore parsing errors
+            if cmd.get("name") not in command_names:
+                continue
+            status = cmd.get("status", "unknown").lower()
+            if status in DONE_STATUSES:
+                continue  # Search finished, not a lock
+            started_str = cmd.get("started")
+            if started_str:
+                try:
+                    started_dt = datetime.fromisoformat(started_str.replace("Z", "+00:00"))
+                    if (now - started_dt) < timedelta(minutes=COOLDOWN_DOWNLOAD_MINUTES):
+                        print(f"  [LOCK] Active {cmd['name']} detected (Status: {status}, Started: {started_str}).")
+                        return True  # Busy
+                except ValueError:
+                    pass
     except Exception as e:
         print(f"Error checking active commands: {e}")
         
-    return False # Not busy
+    return False  # Not busy
 
 def check_queue(base_url, api_key):
     """
@@ -459,63 +539,69 @@ def process_radarr():
             print(f"Skipping {title}: Movie file was previously deleted.")
             continue
 
-        # Check Cycle Quota
+        last_search = get_last_search_timestamp(key)
+
+        # If we searched before and item is still missing → previous search found nothing
+        mark_failed_if_previous_search(key, title)
+
+        # Check Cycle Quota (after potential fail increment)
         if not check_cycle_quota(key, "movie"):
-            print(f"Skipping {title}: Cycle quota reached.")
+            _, rem = get_next_search_time(key)
+            print(f"  Skipping {title}: Cycle quota reached (resets in {rem:.0f}m).")
             continue
 
-        last_search = get_last_search_timestamp(key)
-        
-        # We reuse check_cycle_quota for the "permission" to search,
-        # but we also want to respect the short COOLDOWN_REQUEST_MINUTES (flood protection)
-        # Assuming is_cooled_down logic should still apply to last_search
-        
         if is_cooled_down(last_search):
             candidates.append({
                 "movie": movie,
-                "last_search": last_search
+                "title": title,
+                "key": key,
+                "last_search": last_search,
+                "fail_count": get_fail_count(key),
             })
         else:
-            print(f"Skipping {title}: Cooldown active.")
+            _, remaining = get_next_search_time(key)
+            print(f"  Skipping {title}: Cooldown active (next in {remaining:.0f}m).")
 
     if not candidates:
          print("No eligible Radarr candidates (queue active, cycle limits, or unreleased).")
          return False
 
-    # Sort candidates by last_search timestamp (None/Oldest first)
-    def sort_key(c):
-        ts = c["last_search"]
-        if ts is None:
-            return datetime.min.replace(tzinfo=timezone.utc).isoformat()
-        return ts
-        
-    candidates.sort(key=sort_key)
+    # Sort: fewest fails first, then oldest search first
+    candidates.sort(key=lambda c: (c["fail_count"], c["last_search"] or ""))
+
+    # --- Queue Display ---
+    print(f"\n  Radarr Search Queue ({len(candidates)} candidate(s)):")
+    for i, c in enumerate(candidates):
+        _, rem = get_next_search_time(c["key"])
+        fails = c["fail_count"]
+        marker = "→" if i == 0 else " "
+        print(f"  {marker} #{i+1} {c['title']} | Fails: {fails} | Next: {'Ready' if rem == 0 else f'in {rem:.0f}m'}")
+    print()
     
     # Pick top candidate
     top = candidates[0]["movie"]
     movie_id = top.get("id")
     title = top.get("title")
+    key = candidates[0]["key"]
+
+    print(f"  Radarr → Triggering search for: {title}")
     
-    print(f"Radarr Candidate: {title} (ID: {movie_id})")
-    
-    # Trigger Search
     try:
         cmd_url = f"{RADARR_URL}/api/v3/command"
         payload = {"name": "MoviesSearch", "movieIds": [movie_id]}
         headers = {"X-Api-Key": RADARR_API_KEY, "Content-Type": "application/json"}
         resp = requests.post(cmd_url, json=payload, headers=headers)
         resp.raise_for_status()
-        print(f"Triggered MoviesSearch for {title}")
         record_search(f"movie_{movie_id}", "MoviesSearch", item_type="movie", title=title)
-        return True # Action Taken
+        return True  # Action Taken
     except Exception as e:
-        print(f"Error triggering Radarr search: {e}")
+        print(f"  Error triggering Radarr search: {e}")
         return False
 
 
 # --- Sonarr Logic ---
 
-def process_sonarr(series_map=None):
+def process_sonarr(series_data=None):
     if not SONARR_API_KEY or not SONARR_URL:
         print("Sonarr configuration missing, skipping.")
         return False
@@ -538,8 +624,8 @@ def process_sonarr(series_map=None):
         print("No missing episodes found in Sonarr.")
         return False
 
-    if series_map is None:
-        series_map = get_sonarr_series_map()
+    if series_data is None:
+        series_data = get_sonarr_series_data()
 
     # Group by Series -> Season
     season_groups = {}
@@ -569,29 +655,56 @@ def process_sonarr(series_map=None):
 
     # Collect Actions
     actions = []
-
     for key, episodes in season_groups.items():
         series_id, season_num = key
         
-        # Determine Series Title
-        series_title = series_map.get(series_id)
-        if not series_title:
-             series_title = episodes[0].get("series", {}).get("title", f"Series {series_id}")
+        # Determine Series Title and Season Stats
+        s_info = series_data.get(series_id, {})
+        series_title = s_info.get("title", f"Series {series_id}")
+        
+        # --- Season stats from Sonarr ---
+        season_stats = s_info.get("seasons", {}).get(season_num, {})
+        total_in_season = season_stats.get("totalEpisodeCount", 0)
+        file_count = season_stats.get("episodeFileCount", 0)
+        # identify missing episodes count for this season
+        missing_count = len(episodes)
 
         # Prepare Keys and Last Search Times
         season_key = f"season_{series_id}_{season_num}"
         season_last_search_iso = get_last_search_timestamp(season_key)
-        
+
         # Identify Candidate Episode (First missing)
         episodes.sort(key=lambda x: x.get("episodeNumber"))
         first_ep = episodes[0]
         ep_id = first_ep.get("id")
         ep_num = first_ep.get("episodeNumber")
         ep_title = first_ep.get("title", "")
+        ep_seq_title = f"{series_title} S{season_num}E{ep_num}"
         ep_key = f"episode_{ep_id}"
         ep_last_search_iso = get_last_search_timestamp(ep_key)
 
-        # Parse Timestamps (Treat None as Min/Old)
+        # If we searched before and item is still missing → previous search found nothing
+        mark_failed_if_previous_search(season_key, title=f"{series_title} Season {season_num}")
+        mark_failed_if_previous_search(ep_key, title=ep_seq_title)
+
+        # PRIORITY DECISION:
+        # Use episodeFileCount == 0 as THE reliable signal that nothing exists on disk.
+        # totalEpisodeCount may include specials or future episodes and is unreliable.
+        # If there are ZERO files for this season, we want a Pack Search.
+        if file_count == 0 and total_in_season > 0:
+            prefer_season = True
+            search_type_label = f"Pack Search (0 files — {missing_count} missing / {total_in_season} total)"
+        elif total_in_season > 0 and missing_count >= total_in_season:
+            # Fallback comparison in case stats are delayed/unavailable
+            prefer_season = True
+            search_type_label = f"Pack Search ({missing_count}/{total_in_season} episodes)"
+        else:
+            prefer_season = False
+            search_type_label = f"Individual Search (S{season_num}E{ep_num})"
+
+        print(f"Decision for {series_title} Season {season_num}: {search_type_label} [files={file_count}, total={total_in_season}, missing={missing_count}]")
+
+        # Decision Helper
         def parse_ts(iso_str):
             if not iso_str:
                 return datetime.min.replace(tzinfo=timezone.utc)
@@ -603,15 +716,11 @@ def process_sonarr(series_map=None):
             except ValueError:
                 return datetime.min.replace(tzinfo=timezone.utc)
 
-        season_dt = parse_ts(season_last_search_iso)
-        ep_dt = parse_ts(ep_last_search_iso)
-        
-        # Decision Logic: Prefer action that was performed LEAST recently (Oldest timestamp)
-        # If timestamps are equal (e.g. both None/Never), default to SeasonSearch
-        prefer_season = season_dt <= ep_dt
+        # Logic to decide what to trigger next if the preferred one is in cooldown but NOT the other
+        # Or just follow the 'prefer_season' and fallback as needed.
         
         candidates_checks = []
-        
+
         # Define check routines
         def check_season():
             if not check_cycle_quota(season_key, "season"):
@@ -623,8 +732,10 @@ def process_sonarr(series_map=None):
             return {
                 "type": "SeasonSearch",
                 "last_search": season_last_search_iso,
+                "fail_count": get_fail_count(season_key),
                 "series_id": series_id,
                 "season_num": season_num,
+                "key": season_key,
                 "title": f"{series_title} Season {season_num}",
                 "print_title": f"{series_title} Season {season_num}"
             }
@@ -639,9 +750,12 @@ def process_sonarr(series_map=None):
              return {
                  "type": "EpisodeSearch",
                  "last_search": ep_last_search_iso,
+                 "fail_count": get_fail_count(ep_key),
                  "episode_id": ep_id,
+                 "key": ep_key,
                  "title": f"{series_title} S{season_num}E{ep_num} - {ep_title}",
-                 "print_title": f"{series_title} S{season_num}E{ep_num}"
+                 "print_title": ep_seq_title,
+                 "label": search_type_label
              }
 
         # Execute decision
@@ -649,47 +763,51 @@ def process_sonarr(series_map=None):
             # Try Season first
             res = check_season()
             if res:
+                res["label"] = search_type_label
                 actions.append(res)
             else:
-                # Fallback to Episode if Season blocked
+                # Fallback to Episode if Season blocked (but use Individual Search label)
                 res_ep = check_episode()
                 if res_ep:
+                    res_ep["label"] = "Individual Search (Fallback)"
                     actions.append(res_ep)
         else:
             # Try Episode first
             res = check_episode()
             if res:
+                res["label"] = search_type_label
                 actions.append(res)
             else:
                 # Fallback to Season if Episode blocked
                 res_s = check_season()
                 if res_s:
+                    res_s["label"] = "Pack Search (Fallback)"
                     actions.append(res_s)
 
     if not actions:
         print("No eligible Sonarr candidates (queue active or cycle limits reached).")
         return False
 
-    # Sort actions by Priority (Season < Episode) then Last Search Timestamp (None/Oldest first)
+    # Sort: fewest fails first, then SeasonSearch before EpisodeSearch, then oldest search first
     def sort_key(a):
-        # Priority: SeasonSearch (0) comes before EpisodeSearch (1)
-        priority = 0 if a["type"] == "SeasonSearch" else 1
-        
-        ts = a["last_search"]
-        if ts is None:
-            ts_val = datetime.min.replace(tzinfo=timezone.utc).isoformat()
-        else:
-            ts_val = ts
-            
-        return (priority, ts_val)
-        
+        fail = a.get("fail_count", 0)
+        type_priority = 0 if a["type"] == "SeasonSearch" else 1
+        ts = a["last_search"] or datetime.min.replace(tzinfo=timezone.utc).isoformat()
+        return (fail, type_priority, ts)
+
     actions.sort(key=sort_key)
+
+    # --- Queue Display ---
+    print(f"\n  Sonarr Search Queue ({len(actions)} candidate(s)):")
+    for i, a in enumerate(actions):
+        _, rem = get_next_search_time(a.get("key", ""))
+        fails = a.get("fail_count", 0)
+        marker = "→" if i == 0 else " "
+        print(f"  {marker} #{i+1} [{a['label']}] {a['print_title']} | Fails: {fails} | Next: {'Ready' if rem == 0 else f'in {rem:.0f}m'}")
+    print()
     
     # Execute Top Action
     top = actions[0]
-    
-    print(f"Sonarr Candidate ({top['type']}): {top['print_title']}")
-    
     try:
         cmd_url = f"{SONARR_URL}/api/v3/command"
         headers = {"X-Api-Key": SONARR_API_KEY, "Content-Type": "application/json"}
@@ -702,8 +820,8 @@ def process_sonarr(series_map=None):
             }
             resp = requests.post(cmd_url, json=payload, headers=headers)
             resp.raise_for_status()
-            print(f"Triggered SeasonSearch for {top['print_title']}")
-            record_search(f"season_{top['series_id']}_{top['season_num']}", "SeasonSearch", item_type="season", title=top["title"])
+            print(f"Triggered SeasonSearch for {top['print_title']} - Mode: {top['label']}")
+            record_search(f"season_{top['series_id']}_{top['season_num']}", f"{top['type']} ({top['label']})", item_type="season", title=top["title"])
             return True
             
         elif top["type"] == "EpisodeSearch":
@@ -713,8 +831,8 @@ def process_sonarr(series_map=None):
             }
              resp = requests.post(cmd_url, json=payload, headers=headers)
              resp.raise_for_status()
-             print(f"Triggered EpisodeSearch for {top['print_title']}")
-             record_search(f"episode_{top['episode_id']}", "EpisodeSearch", item_type="episode", title=top["title"])
+             print(f"Triggered EpisodeSearch for {top['print_title']} - Mode: {top['label']}")
+             record_search(f"episode_{top['episode_id']}", f"{top['type']} ({top['label']})", item_type="episode", title=top["title"])
              return True
              
     except Exception as e:
@@ -737,12 +855,12 @@ if __name__ == "__main__":
         print("Global Lock: One or more services are busy performing a search. Aborting run.")
         sys.exit(0)
 
-    s_map = get_sonarr_series_map()
-    list_missing_content(s_map)
+    s_data = get_sonarr_series_data()
+    list_missing_content(s_data)
     
-    # Exclusive Execution: If Radarr runs, Sonarr waits.
-    if process_radarr():
-        print("Action taken by Radarr. Stopping run to respect mutual exclusion.")
-        sys.exit(0)
-        
-    process_sonarr(s_map)
+    # Run BOTH Radarr and Sonarr actions if they have candidates.
+    radarr_acted = process_radarr()
+    if radarr_acted:
+        print("Action taken by Radarr. Continuing to Sonarr...")
+    
+    process_sonarr(s_data)
