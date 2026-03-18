@@ -218,6 +218,25 @@ def get_next_search_time(key):
         return None, 0
 
 
+def get_cycle_reset_time(key, item_type):
+    """Returns minutes remaining until cycle resets, or None if no cycle started."""
+    history = load_history()
+    entry = history.get(key, {})
+    if "cycle_start" not in entry:
+        return None
+    try:
+        cycle_start = datetime.fromisoformat(entry["cycle_start"])
+        if cycle_start.tzinfo is None:
+            cycle_start = cycle_start.replace(tzinfo=timezone.utc)
+        cycle_hours, _ = get_cycle_config(item_type)
+        reset_dt = cycle_start + timedelta(hours=cycle_hours)
+        now = datetime.now(timezone.utc)
+        remaining = (reset_dt - now).total_seconds() / 60
+        return max(0.0, remaining)
+    except ValueError:
+        return None
+
+
 def is_released(item_type, item):
     """
     Determines if the media item is currently released based on available dates.
@@ -546,8 +565,11 @@ def process_radarr():
 
         # Check Cycle Quota (after potential fail increment)
         if not check_cycle_quota(key, "movie"):
-            _, rem = get_next_search_time(key)
-            print(f"  Skipping {title}: Cycle quota reached (resets in {rem:.0f}m).")
+            rem = get_cycle_reset_time(key, "movie")
+            if rem is not None:
+                print(f"  Skipping {title}: Cycle quota reached (resets in {rem:.0f}m).")
+            else:
+                print(f"  Skipping {title}: Cycle quota reached.")
             continue
 
         if is_cooled_down(last_search):
@@ -724,7 +746,11 @@ def process_sonarr(series_data=None):
         # Define check routines
         def check_season():
             if not check_cycle_quota(season_key, "season"):
-                print(f"Skipping {series_title} Season {season_num}: Cycle quota reached.")
+                rem = get_cycle_reset_time(season_key, "season")
+                if rem is not None:
+                    print(f"Skipping {series_title} Season {season_num}: Cycle quota reached (resets in {rem:.0f}m).")
+                else:
+                    print(f"Skipping {series_title} Season {season_num}: Cycle quota reached.")
                 return None
             if not is_cooled_down(season_last_search_iso):
                 print(f"Skipping {series_title} Season {season_num}: Cooldown active.")
@@ -742,7 +768,11 @@ def process_sonarr(series_data=None):
 
         def check_episode():
              if not check_cycle_quota(ep_key, "episode"):
-                 print(f"Skipping {series_title} S{season_num}E{ep_num}: Cycle quota reached.")
+                 rem = get_cycle_reset_time(ep_key, "episode")
+                 if rem is not None:
+                     print(f"Skipping {series_title} S{season_num}E{ep_num}: Cycle quota reached (resets in {rem:.0f}m).")
+                 else:
+                     print(f"Skipping {series_title} S{season_num}E{ep_num}: Cycle quota reached.")
                  return None
              if not is_cooled_down(ep_last_search_iso):
                  print(f"Skipping {series_title} S{season_num}E{ep_num}: Cooldown active.")

@@ -41,8 +41,24 @@ DELETION_DELAY_DAYS = int(os.environ.get("DELETION_DELAY_DAYS", "2"))
 KEEP_REQUESTS_OLDER_THAN_DAYS = int(os.environ.get("KEEP_REQUESTS_OLDER_THAN_DAYS", "14"))
 STUCK_DOWNLOAD_MINUTES = float(os.environ.get("STUCK_DOWNLOAD_MINUTES", "20.0"))
 MAX_DOWNLOAD_HOURS = float(os.environ.get("MAX_DOWNLOAD_HOURS", "6.0"))
+DELETE_NOT_MANAGED = os.environ.get("DELETE_NOT_MANAGED_JELLYSEERR", "true").lower() in ("true", "1", "yes")
 
 PENDING_FILE = "/tmp/jellyseerr_pending_deletions.json"
+
+
+def format_timedelta(td):
+    """Format a timedelta into a human-readable string like '1d 4h' or '36h 20m'."""
+    total_seconds = int(td.total_seconds())
+    if total_seconds < 0:
+        return "now"
+    days = total_seconds // 86400
+    hours = (total_seconds % 86400) // 3600
+    minutes = (total_seconds % 3600) // 60
+    if days > 0:
+        return f"{days}d {hours}h"
+    if hours > 0:
+        return f"{hours}h {minutes:02d}m"
+    return f"{minutes}m"
 
 
 def normalize_media_type(media_type, default="movie"):  # pragma: no cover - simple helper
@@ -687,32 +703,69 @@ def generate_missing_media_report(dry_run=False):
     all_radarr_movies = get_all_radarr_movies_with_status(RADARR_API_KEY, RADARR_URL)
     all_sonarr_series = get_all_sonarr_series_with_status(SONARR_API_KEY, SONARR_URL)
 
-    print("\n--- Radarr Movies ---")
+    # --- Compact Radarr Summary ---
+    radarr_total = len(all_radarr_movies)
+    radarr_has_file = 0
+    radarr_not_released = 0
     for tmdb_id, movie in all_radarr_movies.items():
-        title = friendly_radarr_title(movie)
-        release_date = movie.get("releaseDate") or movie.get("inCinemas") or "Unknown"
-        print(
-            f"{title} (TMDB ID: {tmdb_id}), Has File: {movie.get('hasFile')}, Release Date: {release_date}"
-        )
+        if movie.get("hasFile"):
+            radarr_has_file += 1
+        release_date = movie.get("releaseDate") or movie.get("inCinemas")
+        if release_date and not is_release_due(release_date, RELEASE_BUFFER_DAYS):
+            radarr_not_released += 1
+    radarr_missing_count = radarr_total - radarr_has_file
+    not_rel_str = f" ({radarr_not_released} not yet released)" if radarr_not_released else ""
+    print(f"\n--- Radarr Movies: {radarr_has_file}/{radarr_total} files{not_rel_str} ---")
 
-    print("\n--- Sonarr Series ---")
+    # --- Compact Sonarr Summary ---
+    sonarr_total = len(all_sonarr_series)
+    sonarr_complete = 0
+    sonarr_not_aired = 0
     for tmdb_id, series in all_sonarr_series.items():
-        title = friendly_sonarr_title(series)
-        episode_count = series.get("statistics", {}).get("episodeFileCount")
-        next_air_date = get_sonarr_next_airing(series) or "Unknown"
-        print(
-            f"{title} (TMDB ID: {tmdb_id}), Episode File Count: {episode_count}, Next Airing: {next_air_date}"
-        )
+        stats = series.get("statistics", {})
+        ep_file = stats.get("episodeFileCount", 0)
+        ep_total = stats.get("episodeCount", 0)
+        if ep_total > 0 and ep_file >= ep_total:
+            sonarr_complete += 1
+        next_air = get_sonarr_next_airing(series)
+        if next_air and not is_release_due(next_air, RELEASE_BUFFER_DAYS):
+            sonarr_not_aired += 1
+    not_air_str = f" ({sonarr_not_aired} not yet aired)" if sonarr_not_aired else ""
+    print(f"--- Sonarr Series: {sonarr_complete}/{sonarr_total} complete{not_air_str} ---")
 
-    print("--- Jellyseerr Media ---")
-    print("Unfulfilled media found in requests:")
-    if jellyseerr_requests:
-        for movie in jellyseerr_requests:
-            print(f"- {movie['title']} (ID: {movie['media_id']}, TMDB ID: {movie['tmdb_id']})")
-    else:
-        print("No media found in requests.")
-
-    print(f"Library contains {len(jellyseerr_library)} entries.")
+    # --- Compact Jellyseerr Summary ---
+    jelly_not_released = 0
+    jelly_truly_unfulfilled = 0
+    jelly_not_in_arr = 0
+    for req in jellyseerr_requests:
+        tid = req.get("tmdb_id")
+        mtype = req.get("media_type", "movie")
+        if mtype == "movie" and tid in all_radarr_movies:
+            movie = all_radarr_movies[tid]
+            # Skip if movie already has its file
+            if movie.get("hasFile"):
+                continue
+            release_date = movie.get("releaseDate") or movie.get("inCinemas")
+            if release_date and not is_release_due(release_date, RELEASE_BUFFER_DAYS):
+                jelly_not_released += 1
+            jelly_truly_unfulfilled += 1
+        elif mtype == "tv" and tid in all_sonarr_series:
+            series = all_sonarr_series[tid]
+            stats = series.get("statistics", {})
+            ep_file = stats.get("episodeFileCount", 0)
+            ep_total = stats.get("episodeCount", 0)
+            # Skip if all episodes already have files
+            if ep_total > 0 and ep_file >= ep_total:
+                continue
+            next_air = get_sonarr_next_airing(series)
+            if next_air and not is_release_due(next_air, RELEASE_BUFFER_DAYS):
+                jelly_not_released += 1
+            jelly_truly_unfulfilled += 1
+        else:
+            jelly_not_in_arr += 1
+            continue  # Not in *arr → skip from count
+    jelly_nr_str = f" ({jelly_not_released} not yet released)" if jelly_not_released else ""
+    print(f"--- Jellyseerr: {jelly_truly_unfulfilled} unfulfilled request(s){jelly_nr_str} | {len(jellyseerr_library)} in library ---")
 
     if radarr_missing:
         print("\nRadarr movies to be considered missing:")
@@ -737,11 +790,25 @@ def generate_missing_media_report(dry_run=False):
     current_candidates_tmdb_ids = set(radarr_missing) | set(sonarr_missing)
     
     now = datetime.now(timezone.utc)
+    existing_pending = load_pending_deletions()
     updated_pending = {}
     
     ready_radarr = []
     ready_sonarr = []
     ready_jellyseerr = []
+    
+    # Counters for final summary
+    pending_radarr_count = 0
+    pending_sonarr_count = 0
+    ready_radarr_count = 0
+    ready_sonarr_count = 0
+    rollback_count = 0
+    rollback_soonest_td = None
+    
+    _sep = '═' * 55
+    print(f"\n{_sep}")
+    print(f"  Deletion Queue ({len(current_candidates_tmdb_ids)} candidate(s))")
+    print(f"{_sep}")
     
     # Process current candidates
     for tmdb_id in current_candidates_tmdb_ids:
@@ -760,11 +827,25 @@ def generate_missing_media_report(dry_run=False):
              
         media_info = jellyseerr_data.get("mediaInfo")
         if not media_info:
-            # Not in Jellyseerr or no media info, skip
-            print(f"SKIPPING: TMDB ID {tmdb_id} (Not managed by Jellyseerr or no media info found)")
+            if DELETE_NOT_MANAGED:
+                # Resolve title for display
+                if tmdb_id in radarr_missing:
+                    title_nm = radarr_missing[tmdb_id]
+                    ready_radarr.append(tmdb_id)
+                    ready_radarr_count += 1
+                elif tmdb_id in sonarr_missing:
+                    title_nm = sonarr_missing[tmdb_id].get("title", f"TMDB {tmdb_id}")
+                    ready_sonarr.append(sonarr_missing[tmdb_id])
+                    ready_sonarr_count += 1
+                else:
+                    title_nm = f"TMDB {tmdb_id}"
+                print(f"  🗑 {title_nm} | Not in Jellyseerr → will be deleted")
+            else:
+                print(f"  NOT IN JELLYSEERR TMDB {tmdb_id} — Not managed by Jellyseerr")
             continue
             
         requests_list = media_info.get("requests", [])
+        has_request = bool(requests_list)
         
         if requests_list:
             # Sort requests by date descending to get the latest
@@ -777,7 +858,7 @@ def generate_missing_media_report(dry_run=False):
             # Fallback to media creation date if no requests exist
             request_date_str = media_info.get("createdAt")
             if not request_date_str:
-                print(f"SKIPPING: TMDB ID {tmdb_id} (Managed by Jellyseerr but no request or creation date found)")
+                print(f"  NOT IN JELLYSEERR TMDB {tmdb_id} — No request or creation date found")
                 continue
             requester = "Media-Only (No Request)"
         
@@ -788,16 +869,40 @@ def generate_missing_media_report(dry_run=False):
         
         # Entry for pending file (store based on latest request)
         tmdb_id_str = str(tmdb_id)
+        
+        # Preserve first_seen from existing pending data for rollback tracking
+        prev_entry = existing_pending.get(tmdb_id_str, {})
+        first_seen_str = prev_entry.get("first_seen", now.isoformat())
+        
         entry = {
             "tmdb_id": tmdb_id,
             "title": title,
             "request_date": request_date_str,
             "requested_by": requester,
-            "media_id": media_id
+            "media_id": media_id,
+            "first_seen": first_seen_str,
         }
         
         # Add to pending list
         updated_pending[tmdb_id_str] = entry
+        
+        # --- Rollback check for no-request candidates ---
+        if not has_request:
+            first_seen_dt = parse_iso_datetime(first_seen_str)
+            if first_seen_dt:
+                if first_seen_dt.tzinfo is None:
+                    first_seen_dt = first_seen_dt.replace(tzinfo=timezone.utc)
+                rollback_deadline = first_seen_dt + timedelta(days=DELETION_DELAY_DAYS)
+                remaining_rollback = rollback_deadline - now
+                
+                if remaining_rollback.total_seconds() > 0:
+                    rollback_count += 1
+                    if rollback_soonest_td is None or remaining_rollback < rollback_soonest_td:
+                        rollback_soonest_td = remaining_rollback
+                    print(f"  {title} | No request — rollback in: {format_timedelta(remaining_rollback)}")
+                    continue  # Skip deletion, still in rollback window
+                else:
+                    print(f"  {title} | No request — rollback expired, proceeding")
         
         # Check if ready to delete
         if request_date:
@@ -805,22 +910,30 @@ def generate_missing_media_report(dry_run=False):
             if request_date.tzinfo is None:
                 request_date = request_date.replace(tzinfo=timezone.utc)
             
-            age_days = (now - request_date).days
+            age = now - request_date
+            age_days = age.days
+            deletion_deadline = request_date + timedelta(days=DELETION_DELAY_DAYS)
+            remaining = deletion_deadline - now
+            age_str = format_timedelta(age)
+            
             if age_days >= DELETION_DELAY_DAYS:
 
                 # Skip report_only sonarr entries early — they are incomplete but should NOT be deleted
                 if tmdb_id in sonarr_missing and sonarr_missing[tmdb_id].get("action") == "report_only":
-                    print(f"SKIPPING: {title} (Age: {age_days} days, Requested by: {requester}) — some episodes missing but series has files")
+                    print(f"  PARTIAL {title} | {requester} | Skipped — has files, only partial missing")
                     continue
 
-                # Ready for deletion of MEDIA
-                print(f"READY TO DELETE MEDIA: {title} (Age: {age_days} days, Requested by: {requester})")
+                # Ready for deletion
+                marker = "→"
+                print(f"  {marker} {title} | By: {requester} | READY — will be deleted now | Requested: {age_str} ago")
                 
                 # Add to execution lists
                 if tmdb_id in radarr_missing:
                     ready_radarr.append(tmdb_id)
+                    ready_radarr_count += 1
                 elif tmdb_id in sonarr_missing:
                     ready_sonarr.append(sonarr_missing[tmdb_id])
+                    ready_sonarr_count += 1
                  
                 # Check if we should delete the Jellyseerr request
                 if age_days < KEEP_REQUESTS_OLDER_THAN_DAYS:
@@ -834,20 +947,36 @@ def generate_missing_media_report(dry_run=False):
                         "requested_by": requester,  
                     }
                     ready_jellyseerr.append(req_obj)
-                    print(f"  -> Will also delete Jellyseerr request (Age {age_days} < {KEEP_REQUESTS_OLDER_THAN_DAYS} days)")
                 else:
-                    print(f"  -> Keeping Jellyseerr request (Age {age_days} >= {KEEP_REQUESTS_OLDER_THAN_DAYS} days)")
+                    pass  # Keep old Jellyseerr request
             else:
-                print(f"PENDING: {title} (Age: {age_days} days < {DELETION_DELAY_DAYS} days delay)")
+                remaining_str = format_timedelta(remaining)
+                if tmdb_id in radarr_missing:
+                    pending_radarr_count += 1
+                elif tmdb_id in sonarr_missing:
+                    pending_sonarr_count += 1
+                print(f"  WAITING... {title} | By: {requester} | Deletion in: {remaining_str} | Requested: {age_str} ago")
         else:
-             print(f"SKIPPING: {title} (No request date found)")
+             print(f"  NOT IN JELLYSEERR {title} — No request date found")
 
     # Save updated pending state
     save_pending_deletions(updated_pending)
 
+    # --- Final Summary Block ---
+    # Pending = total missing minus those ready to delete
+    total_pending_radarr = len(radarr_missing) - ready_radarr_count
+    total_pending_sonarr = len(sonarr_missing) - ready_sonarr_count
+    print(f"\n{_sep}")
+    print("  Cleaner Summary")
+    print(f"  Radarr: {radarr_has_file}/{radarr_total} files | {total_pending_radarr} pending | {ready_radarr_count} ready")
+    print(f"  Sonarr: {sonarr_complete}/{sonarr_total} complete | {total_pending_sonarr} pending | {ready_sonarr_count} ready")
+    if rollback_count > 0 and rollback_soonest_td:
+        print(f"  Rollback: {rollback_count} candidate(s) without request (soonest in {format_timedelta(rollback_soonest_td)})")
+    print(f"{_sep}")
+
     # Perform Deletions
     if dry_run:
-        print("\n--- DRY RUN SUMMARY ---")
+        print("\n--- DRY RUN ---")
         print(f"Would delete {len(ready_radarr)} movies from Radarr")
         print(f"Would delete {len(ready_sonarr)} series from Sonarr")
         print(f"Would delete {len(ready_jellyseerr)} requests from Jellyseerr")
