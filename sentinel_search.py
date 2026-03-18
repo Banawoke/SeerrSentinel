@@ -13,7 +13,7 @@ import requests
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-# Config centralisée (charge aussi le .env)
+# Config centralisée (load .env)
 from seerr_sentinel import load_config
 
 _cfg = load_config([
@@ -32,15 +32,15 @@ COOLDOWN_REQUEST_MINUTES = 15
 COOLDOWN_DOWNLOAD_MINUTES = 10
 
 
-# Cycle Configuration (12h Quotas per content)
-MOVIE_CYCLE_HOURS = 12
-MOVIE_MAX_SEARCHES = 6
+# Cycle Configuration (Quotas per content) - Overridable via .env
+MOVIE_CYCLE_HOURS = int(os.environ.get("MOVIE_CYCLE_HOURS", "12"))
+MOVIE_MAX_SEARCHES = int(os.environ.get("MOVIE_MAX_SEARCHES", "2"))
 
-SEASON_CYCLE_HOURS = 12
-SEASON_MAX_SEARCHES = 6
+SEASON_CYCLE_HOURS = int(os.environ.get("SEASON_CYCLE_HOURS", "12"))
+SEASON_MAX_SEARCHES = int(os.environ.get("SEASON_MAX_SEARCHES", "2"))
 
-EPISODE_CYCLE_HOURS = 12
-EPISODE_MAX_SEARCHES = 4
+EPISODE_CYCLE_HOURS = int(os.environ.get("EPISODE_CYCLE_HOURS", "12"))
+EPISODE_MAX_SEARCHES = int(os.environ.get("EPISODE_MAX_SEARCHES", "1"))
 
 
 def load_history():

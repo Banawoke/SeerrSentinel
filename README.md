@@ -50,6 +50,12 @@ services:
       # - SEARCH_INTERVAL_MINUTES=15
       # - IMPORT_INTERVAL_MINUTES=30
       # - CLEAN_INTERVAL_MINUTES=240
+      # - MOVIE_CYCLE_HOURS=12
+      # - MOVIE_MAX_SEARCHES=2
+      # - SEASON_CYCLE_HOURS=12
+      # - SEASON_MAX_SEARCHES=2
+      # - EPISODE_CYCLE_HOURS=12
+      # - EPISODE_MAX_SEARCHES=1
     volumes:
       - /path/to/your/downloads:/downloads
 ```
@@ -177,6 +183,12 @@ python3 seerr_sentinel.py import --sonarr --force-id 42
 | `SEARCH_INTERVAL_MINUTES` | optional | How frequently the search module runs (default: `15`) |
 | `IMPORT_INTERVAL_MINUTES` | optional | How frequently the import module runs (default: `30`) |
 | `CLEAN_INTERVAL_MINUTES` | optional | How frequently the clean module runs (default: `240`) |
+| `MOVIE_CYCLE_HOURS` | optional | Duration of search cycle for movies (default: `12`) |
+| `MOVIE_MAX_SEARCHES` | optional | Max searches per cycle for a movie (default: `2`) |
+| `SEASON_CYCLE_HOURS` | optional | Duration of search cycle for seasons (default: `12`) |
+| `SEASON_MAX_SEARCHES` | optional | Max searches per cycle for a season (default: `2`) |
+| `EPISODE_CYCLE_HOURS` | optional | Duration of search cycle for individual episodes (default: `12`) |
+| `EPISODE_MAX_SEARCHES` | optional | Max searches per cycle for an episode (default: `1`) |
 
 ## Architecture
 
