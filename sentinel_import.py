@@ -235,6 +235,25 @@ class MediaImporter:
                     except: pass
         return False
 
+    def is_hardlinked(self, source_path):
+        """Returns True if any video file in source_path has a hardlink count > 1."""
+        if os.path.isfile(source_path):
+            if source_path.lower().endswith(('.mkv', '.mp4', '.avi')):
+                try:
+                    return os.stat(source_path).st_nlink > 1
+                except:
+                    pass
+        elif os.path.isdir(source_path):
+            for root, _, files in os.walk(source_path):
+                for f in files:
+                    if f.lower().endswith(('.mkv', '.mp4', '.avi')):
+                        try:
+                            if os.stat(os.path.join(root, f)).st_nlink > 1:
+                                return True
+                        except:
+                            pass
+        return False
+
     def link_file(self, source, target):
         if os.path.exists(target): return False
         try:
@@ -461,6 +480,10 @@ class RadarrImporter(MediaImporter):
                 dest_path = m['path']
                 if self.check_inode_match(match['path'], dest_path):
                     print("  -> Already linked (Inode). Skipping.")
+                    continue
+
+                if self.is_hardlinked(match['path']):
+                    print("  -> [SKIP] File is already imported elsewhere (hardlink count > 1). False positive avoided.")
                     continue
 
                 if self.force_injection(m['id'], match['path'], dest_path):
@@ -705,10 +728,20 @@ class SonarrImporter(MediaImporter):
                 print(f"{s['title']} (TMDB ID: {s['tmdbId']}) - {len(matches)} sources")
                 dest_path = s['path']
                 
+                valid_matches = []
                 already_linked = False
                 for m in matches:
-                     if self.check_inode_match(m['path'], dest_path):
-                         already_linked = True
+                    if self.check_inode_match(m['path'], dest_path):
+                        already_linked = True
+                        valid_matches.append(m)
+                    elif self.is_hardlinked(m['path']):
+                        print(f"  -> [SKIP] '{m['name']}' is already imported elsewhere. False positive avoided.")
+                    else:
+                        valid_matches.append(m)
+                
+                matches = valid_matches
+                if not matches:
+                    continue
                 
                 if already_linked:
                     print("  -> Some files already linked (Inode). Triggering consistency scan.")
