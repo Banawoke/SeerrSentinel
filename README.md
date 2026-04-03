@@ -3,7 +3,7 @@
 </p>
 <h1 align="center">SeerrSentinel</h1>
 
-Automation suite for managing **Seerr**, **Radarr**, and **Sonarr**. I was struggling to keep my library clean so i made this script. The goal of SeerrSentinel is to automate media discovery, library cleanup, and file imports for Seerr, Radarr, and Sonarr. It is inspired by [Huntarr.io](https://github.com/plexguide/Huntarr.io).
+Automation suite for managing **Seerr**, **Radarr**, and **Sonarr**. I was struggling to keep my library clean so i made this script. The goal of SeerrSentinel is to automate media discovery, library cleanup, and file imports for Seerr, Radarr, and Sonarr.
 
 >[!IMPORTANT]
 > This is very early software, any help will be verry welcome it work with my use case but may need some tweeks for yours. Report any bug or feature request 😊.
@@ -191,13 +191,6 @@ python3 seerr_sentinel.py import --sonarr --force-id 42
 | `EPISODE_MAX_SEARCHES` | optional | Max searches per cycle for an episode (default: `1`) |
 
 ## Architecture
-
-```
-seerr_sentinel.py          ← orchestrator + load_config() + scheduling
-├── sentinel_search.py     ← Radarr/Sonarr MoviesSearch / SeasonSearch / EpisodeSearch
-├── sentinel_cleaner.py    ← missing media detection + Radarr/Sonarr/Jellyseerr deletion
-└── sentinel_import.py     ← hard-link injection + Radarr/Sonarr rescan
-```
 
 ### `seerr_sentinel.py all` and `daemon` logic
 
