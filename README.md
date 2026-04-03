@@ -30,6 +30,7 @@ services:
     image: ghcr.io/banawoke/seerrsentinel:latest
     container_name: seerr-sentinel
     restart: unless-stopped
+    user: "1000:1000" # Run as your local user (recommend)
     environment:
       - JELLYSEER_API_KEY=your_api_key
       - JELLYSEER_URL=http://your-jellyseerr:5055
@@ -39,8 +40,6 @@ services:
       - SONARR_API_KEY=your_api_key
       - SONARR_URL=http://your-sonarr:8989
       - DOWNLOADS_PATH=/downloads
-      - PUID=1000
-      - PGID=1000
       # - RELEASE_BUFFER_DAYS=7
       # - DELETION_DELAY_DAYS=2
       # - KEEP_REQUESTS_OLDER_THAN_DAYS=14
@@ -78,8 +77,7 @@ docker run -d \
   -e SONARR_API_KEY=your_api_key \
   -e SONARR_URL=http://your-sonarr:8989 \
   -e DOWNLOADS_PATH=/downloads \
-  -e PUID=1000 \
-  -e PGID=1000 \
+  --user 1000:1000 \
   # Other optional variables
   -v /path/to/your/downloads:/downloads \
   ghcr.io/banawoke/seerrsentinel:latest
@@ -172,8 +170,6 @@ python3 seerr_sentinel.py import --sonarr --force-id 42
 | `SONARR_API_KEY` | yes | Sonarr API key |
 | `SONARR_URL` | yes | Sonarr URL (`http://your-sonarr:8989`) |
 | `DOWNLOADS_PATH` | yes | Path to the downloads folder |
-| `PUID` | yes | User ID for chown on injected files |
-| `PGID` | yes | Group ID for chown on injected files |
 | `RELEASE_BUFFER_DAYS` | optional | Days after release before cleanup (default: `7`) |
 | `DELETION_DELAY_DAYS` | optional | Grace period before deletion (default: `2`) |
 | `KEEP_REQUESTS_OLDER_THAN_DAYS` | optional | Keep Jellyseerr requests older than N days (default: `14`) |
@@ -218,5 +214,5 @@ When running the `all` command (or the `daemon` mode), the script manages its ow
 
 1. Scans the `DOWNLOADS_PATH` folder
 2. Matches files against missing media using title tokens + TMDB aliases
-3. Creates hard-links in Radarr/Sonarr media folders
+3. Creates hard-links in Radarr/Sonarr media folders (ensure the container user has write access)
 4. Triggers a `RescanMovie` / `RescanSeries` and waits for confirmation

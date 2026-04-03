@@ -21,8 +21,6 @@ from seerr_sentinel import load_config
 _cfg = load_config([
     "DOWNLOADS_PATH",
     "TMDB_API_KEY",
-    "PUID",
-    "PGID",
     "RADARR_API_KEY",
     "RADARR_URL",
     "SONARR_API_KEY",
@@ -41,8 +39,6 @@ SONARR_VARS = {
 REQUIRED_VARS = {
     "DOWNLOADS_PATH": _cfg["DOWNLOADS_PATH"],
     "TMDB_API_KEY": _cfg["TMDB_API_KEY"],
-    "PUID": _cfg["PUID"],
-    "PGID": _cfg["PGID"],
     "RADARR_API_KEY": _cfg["RADARR_API_KEY"],
     "SONARR_API_KEY": _cfg["SONARR_API_KEY"],
     "RADARR_URL": _cfg["RADARR_URL"],
@@ -53,10 +49,6 @@ class MediaImporter:
     def __init__(self):
         self.downloads_path = REQUIRED_VARS["DOWNLOADS_PATH"]
         self.tmdb_key = REQUIRED_VARS["TMDB_API_KEY"]
-        
-        self.puid = int(REQUIRED_VARS["PUID"]) if REQUIRED_VARS["PUID"] else None
-        self.pgid = int(REQUIRED_VARS["PGID"]) if REQUIRED_VARS["PGID"] else None
-        
         self.tmdb_cache = {}
 
     def normalize(self, text):
@@ -258,8 +250,7 @@ class MediaImporter:
         if os.path.exists(target): return False
         try:
             os.link(source, target)
-            os.chmod(target, 0o777)
-            self.ensure_ownership(target)
+            os.chmod(target, 0o664) # Readable by the group, typically Sonarr/Radarr
             return True
         except OSError as e:
             print(f"  -> Link failed: {e}")
@@ -284,14 +275,6 @@ class MediaImporter:
             except Exception:
                 time.sleep(2)
         return False
-
-    def ensure_ownership(self, path):
-        """Chown path to PUID:PGID if set."""
-        if self.puid is not None and self.pgid is not None:
-            try:
-                os.chown(path, self.puid, self.pgid)
-            except OSError as e:
-                print(f"  -> [WARN] Failed to chown {path}: {e}")
 
     def clear_queue_for_item(self, url, api_key, item_id, id_field_name):
         """Remove any stuck queue entries for this item after successful import."""
@@ -356,8 +339,7 @@ class RadarrImporter(MediaImporter):
     def force_injection(self, movie_id, source_path, dest_dir):
         if not os.path.exists(dest_dir):
             try: 
-                os.makedirs(dest_dir, mode=0o777, exist_ok=True)
-                self.ensure_ownership(dest_dir)
+                os.makedirs(dest_dir, mode=0o775, exist_ok=True)
             except OSError: return False
 
         source_file = None
@@ -580,8 +562,7 @@ class SonarrImporter(MediaImporter):
     def force_injection(self, series_id, source_path, dest_dir, existing_episodes):
         if not os.path.exists(dest_dir):
             try: 
-                os.makedirs(dest_dir, mode=0o777, exist_ok=True)
-                self.ensure_ownership(dest_dir)
+                os.makedirs(dest_dir, mode=0o775, exist_ok=True)
             except: return []
 
         files_to_link = []
@@ -629,8 +610,7 @@ class SonarrImporter(MediaImporter):
             season_dir = os.path.join(dest_dir, f"Season {s_num}")
             if not os.path.exists(season_dir):
                 try: 
-                    os.makedirs(season_dir, mode=0o777, exist_ok=True)
-                    self.ensure_ownership(season_dir)
+                    os.makedirs(season_dir, mode=0o775, exist_ok=True)
                 except: pass
             
             target_name = temp if match_se else f"S{s_num:02d}E{e_num:02d}{os.path.splitext(filename)[1]}"

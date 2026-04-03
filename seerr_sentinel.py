@@ -42,8 +42,6 @@ _ALL_REQUIRED_VARS = [
     "SONARR_API_KEY",
     "SONARR_URL",
     "DOWNLOADS_PATH",
-    "PUID",
-    "PGID",
 ]
 
 _ALL_OPTIONAL_VARS = {
