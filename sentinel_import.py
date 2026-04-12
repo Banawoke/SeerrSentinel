@@ -541,23 +541,52 @@ class SonarrImporter(MediaImporter):
             all_eps = requests.get(f"{self.url}/api/v3/episode?seriesId={series_id}", headers={"X-Api-Key": self.api_key}).json()
             
             success_count = 0
+            imported_episode_ids = set()
             for e in all_eps:
                 key = (e.get('seasonNumber'), e.get('episodeNumber'))
                 if key in injected_episodes:
                     if e.get('hasFile'):
                         success_count += 1
+                        imported_episode_ids.add(e.get('id'))
                     else:
                         print(f"  -> [WARN] S{key[0]:02d}E{key[1]:02d} still missing file.")
             
             if success_count > 0:
                 print(f"  -> [SUCCESS] {success_count}/{len(injected_episodes)} injected episodes are now imported!")
-                self.clear_queue_for_item(self.url, self.api_key, series_id, "seriesId")
+                # Only clean queue entries whose episodes are actually imported
+                self._cleanup_imported_queue_entries(series_id, imported_episode_ids)
                 return True
             return False
             
         except Exception as e:
             print(f"  -> Verify failed: {e}")
             return False
+
+    def _cleanup_imported_queue_entries(self, series_id, imported_episode_ids):
+        """Remove queue entries only if ALL their episodes have been imported."""
+        try:
+            q_url = f"{self.url}/api/v3/queue?pageSize=200"
+            resp = requests.get(q_url, headers={"X-Api-Key": self.api_key})
+            if resp.status_code != 200:
+                return
+            records = resp.json().get("records", [])
+
+            for r in records:
+                if r.get("seriesId") != series_id:
+                    continue
+                ep_id = r.get("episodeId")
+                # Only remove if this specific episode was imported
+                if ep_id and ep_id in imported_episode_ids:
+                    queue_id = r.get("id")
+                    title = r.get("title")
+                    print(f"  -> [CLEANUP] Removing queue item '{title}' (episode imported).")
+                    del_url = f"{self.url}/api/v3/queue/{queue_id}"
+                    requests.delete(del_url, params={"removeFromClient": "true", "blocklist": "false"}, headers={"X-Api-Key": self.api_key})
+                else:
+                    title = r.get("title")
+                    print(f"  -> [KEEP] Queue item '{title}' kept (not all episodes imported yet).")
+        except Exception as e:
+            print(f"  -> [WARN] Error cleaning queue for series {series_id}: {e}")
 
     def force_injection(self, series_id, source_path, dest_dir, existing_episodes):
         if not os.path.exists(dest_dir):
@@ -578,27 +607,61 @@ class SonarrImporter(MediaImporter):
         injected = []
         linked_count = 0
         skipped_existing = 0
-        
+
+        # Try to detect season from the source directory path (for cases where
+        # the filename itself has no SxxExx but the parent folder does,
+        # e.g. "Grand.Galop.S02.FRENCH.DVD.x265/201 - titre.mkv")
+        path_season_hint = None
+        match_path_s = re.search(r'[/\\].*?S(\d+)', source_path, re.IGNORECASE)
+        if match_path_s:
+            path_season_hint = int(match_path_s.group(1))
+
         for src in files_to_link:
             filename = os.path.basename(src)
-            # Season detection
-            match_s = re.search(r'S(\d+)', os.path.basename(src), re.IGNORECASE)
-            s_num = int(match_s.group(1)) if match_s else 1
-            
-            # Episode detection
+            # Season detection: first try filename, then fall back to path hint
+            match_s = re.search(r'S(\d+)', filename, re.IGNORECASE)
+            s_num = None
             e_num = None
+
+            # --- Standard SxxExx detection ---
             temp = re.sub(r'S(\d+)\s*[-_]\s*(\d+)', r'S\1E\2', filename, flags=re.IGNORECASE)
             match_se = re.search(r'S(\d+)E(\d+)', temp, re.IGNORECASE)
             if match_se:
+                s_num = int(match_se.group(1))
                 e_num = int(match_se.group(2))
             else:
-                 parts = re.findall(r'(?:^|[._\-\s\[])(\d{1,3})(?:$|[._\-\s\]])', filename)
-                 for p in parts:
-                     val = int(p)
-                     if val not in [1080, 720, 264, 265, 480]:
-                         e_num = val
-                         break
-            
+                # --- Composite number detection ---
+                # Filenames like "201 - titre.mkv" or "1012 - titre.mkv"
+                # where the number encodes season+episode (e.g. 2+01 or 10+12)
+                lead_match = re.match(r'^(\d{3,4})(?:\s*[-._])', filename)
+                if lead_match and path_season_hint is not None:
+                    raw_num = lead_match.group(1)
+                    # Try to decompose using the known season from parent path
+                    s_prefix = str(path_season_hint)
+                    if raw_num.startswith(s_prefix):
+                        ep_part = raw_num[len(s_prefix):]
+                        if ep_part and ep_part.isdigit():
+                            s_num = path_season_hint
+                            e_num = int(ep_part)
+
+                # --- Generic number fallback ---
+                if e_num is None:
+                    parts = re.findall(r'(?:^|[._\-\s\[])(\d{1,3})(?:$|[._\-\s\]])', filename)
+                    for p in parts:
+                        val = int(p)
+                        if val not in [1080, 720, 264, 265, 480]:
+                            e_num = val
+                            break
+
+            # Final season fallback
+            if s_num is None:
+                if match_s:
+                    s_num = int(match_s.group(1))
+                elif path_season_hint is not None:
+                    s_num = path_season_hint
+                else:
+                    s_num = 1
+
             if e_num is None:
                 # print(f"  -> [SKIP] Could not determine episode number for {filename}")
                 continue
