@@ -741,7 +741,20 @@ class SonarrImporter(MediaImporter):
                     total_injected += len(result)
                 
                 if total_injected == 0:
-                    print(f"  -> All matched episodes already imported ({len(existing)} existing). Nothing to inject.")
+                    # Distinguish between "no video files in source" and "all already imported"
+                    source_has_video = any(
+                        f.lower().endswith(('.mkv', '.mp4', '.avi'))
+                        for m in matches
+                        for root, _, fs in os.walk(m['path']) if os.path.isdir(m['path'])
+                        for f in fs
+                    ) or any(
+                        m['name'].lower().endswith(('.mkv', '.mp4', '.avi'))
+                        for m in matches if m['type'] == 'file'
+                    )
+                    if not source_has_video:
+                        print(f"  -> [SKIP] Source matched but contains no video files (torrent pending?). Nothing to inject.")
+                    else:
+                        print(f"  -> All matched episodes already imported ({len(existing)} existing). Nothing to inject.")
             else:
                 print(f"{s['title']} (TMDB ID: {s.get('tmdbId', '?')}) -> No match found on disk")
 
