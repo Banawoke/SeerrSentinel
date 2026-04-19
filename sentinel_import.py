@@ -336,11 +336,14 @@ class RadarrImporter(MediaImporter):
                 return False
         except: return False
 
-    def force_injection(self, movie_id, source_path, dest_dir):
+    def force_injection(self, movie, source_path, dest_dir):
+        movie_id = movie['id']
         if not os.path.exists(dest_dir):
             try: 
                 os.makedirs(dest_dir, mode=0o775, exist_ok=True)
-            except OSError: return False
+            except OSError as e:
+                print(f"  -> [ERROR] Cannot create destination directory {dest_dir}: {e}")
+                return False
 
         source_file = None
         if os.path.isdir(source_path):
@@ -355,7 +358,15 @@ class RadarrImporter(MediaImporter):
         
         if not source_file: return False
 
-        target_file = os.path.join(dest_dir, os.path.basename(source_file))
+        # Build a safe and recognizable title for Jellyfin
+        movie_title = movie.get('title', 'Unknown')
+        movie_year = movie.get('year', '')
+        # Sanitize for filesystem
+        safe_title = re.sub(r'[\\/*?:"<>|]', "", movie_title)
+        ext = os.path.splitext(source_file)[1]
+        target_name = f"{safe_title} ({movie_year}){ext}" if movie_year else f"{safe_title}{ext}"
+        target_file = os.path.join(dest_dir, target_name)
+
         if self.link_file(source_file, target_file):
             print(f"  -> Linked {os.path.basename(source_file)}")
             # Rescan and wait for completion
@@ -366,6 +377,21 @@ class RadarrImporter(MediaImporter):
                 if cmd_id:
                     print(f"  -> Waiting for RescanMovie to complete...")
                     self.wait_for_command(self.url, self.api_key, cmd_id)
+            
+            # Enforce exact Radarr naming scheme
+            try:
+                rn_resp = requests.get(f"{self.url}/api/v3/rename?movieId={movie_id}", headers={"X-Api-Key": self.api_key})
+                if rn_resp.status_code == 200:
+                    rename_list = rn_resp.json()
+                    file_ids = [item.get("movieFileId") for item in rename_list if "movieFileId" in item]
+                    if file_ids:
+                        cmd_rename = {"name": "RenameFiles", "movieId": movie_id, "files": file_ids}
+                        r_cmd = requests.post(cmd_url, json=cmd_rename, headers={"X-Api-Key": self.api_key})
+                        if r_cmd.status_code == 201:
+                            print(f"  -> Triggered RenameFiles to apply custom naming scheme.")
+            except Exception as e:
+                print(f"  -> [WARN] Error triggering auto-rename: {e}")
+
             return True
         return False
 
@@ -468,7 +494,7 @@ class RadarrImporter(MediaImporter):
                     print("  -> [SKIP] File is already imported elsewhere (hardlink count > 1). False positive avoided.")
                     continue
 
-                if self.force_injection(m['id'], match['path'], dest_path):
+                if self.force_injection(m, match['path'], dest_path):
                     self.verify_import(m['id'])
             else:
                 print(f"{m['title']} (TMDB ID: {m.get('tmdbId', '?')}) -> No match found on disk")
@@ -592,7 +618,9 @@ class SonarrImporter(MediaImporter):
         if not os.path.exists(dest_dir):
             try: 
                 os.makedirs(dest_dir, mode=0o775, exist_ok=True)
-            except: return []
+            except OSError as e:
+                print(f"  -> [ERROR] Cannot create destination directory {dest_dir}: {e}")
+                return []
 
         files_to_link = []
         if os.path.isdir(source_path):
@@ -692,6 +720,21 @@ class SonarrImporter(MediaImporter):
                 if cmd_id:
                     print(f"  -> Waiting for RescanSeries to complete...")
                     self.wait_for_command(self.url, self.api_key, cmd_id)
+            
+            # Enforce exact Sonarr naming scheme
+            try:
+                rn_resp = requests.get(f"{self.url}/api/v3/rename?seriesId={series_id}", headers={"X-Api-Key": self.api_key})
+                if rn_resp.status_code == 200:
+                    rename_list = rn_resp.json()
+                    file_ids = [item.get("episodeFileId") for item in rename_list if "episodeFileId" in item]
+                    if file_ids:
+                        cmd_rename = {"name": "RenameFiles", "seriesId": series_id, "files": file_ids}
+                        r_cmd = requests.post(f"{self.url}/api/v3/command", json=cmd_rename, headers={"X-Api-Key": self.api_key})
+                        if r_cmd.status_code == 201:
+                            print(f"  -> Triggered RenameFiles to apply custom naming scheme.")
+            except Exception as e:
+                print(f"  -> [WARN] Error triggering auto-rename: {e}")
+
             self.verify_import(series_id, injected)
         
         return injected

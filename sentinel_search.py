@@ -159,9 +159,21 @@ def record_search(key, search_type, item_type="movie", title=None):
     save_history(history)
     _, max_s = get_cycle_config(item_type)
     next_dt = now + timedelta(minutes=COOLDOWN_REQUEST_MINUTES)
-    cycle_end_dt = datetime.fromisoformat(entry["cycle_start"]) + timedelta(hours=get_cycle_config(item_type)[0])
+    
+    cycle_start = datetime.fromisoformat(entry["cycle_start"])
+    if cycle_start.tzinfo is None:
+        cycle_start = cycle_start.replace(tzinfo=timezone.utc)
+    cycle_end_dt = cycle_start + timedelta(hours=get_cycle_config(item_type)[0])
+    
+    def fmt_rem(dt):
+        rem_m = (dt - now).total_seconds() / 60.0
+        if rem_m <= 0: return "Ready"
+        h = int(rem_m // 60)
+        m = int(rem_m % 60)
+        return f"in {h}h{m:02d}m" if h > 0 else f"in {m}m"
+
     print(f"  [RECORDED] {search_type} | {title}")
-    print(f"             Cycle: {entry['count']}/{max_s} | Fails: {entry.get('fail_count', 0)} | Next search at {next_dt.strftime('%H:%M')} | Cycle resets at {cycle_end_dt.strftime('%H:%M')}")
+    print(f"             Cycle: {entry['count']}/{max_s} | Fails: {entry.get('fail_count', 0)} | Next search: {fmt_rem(next_dt)} | Cycle resets: {fmt_rem(cycle_end_dt)}")
 
 
 def record_search_failed(key, title=None):
@@ -597,7 +609,12 @@ def process_radarr():
         _, rem = get_next_search_time(c["key"])
         fails = c["fail_count"]
         marker = "→" if i == 0 else " "
-        print(f"  {marker} #{i+1} {c['title']} | Fails: {fails} | Next: {'Ready' if rem == 0 else f'in {rem:.0f}m'}")
+        def fmt_m(m):
+            if m <= 0: return "Ready"
+            h = int(m // 60)
+            mins = int(m % 60)
+            return f"in {h}h{mins:02d}m" if h > 0 else f"in {mins}m"
+        print(f"  {marker} #{i+1} {c['title']} | Fails: {fails} | Next: {fmt_m(rem)}")
     print()
     
     # Pick top candidate
@@ -612,8 +629,11 @@ def process_radarr():
         cmd_url = f"{RADARR_URL}/api/v3/command"
         payload = {"name": "MoviesSearch", "movieIds": [movie_id]}
         headers = {"X-Api-Key": RADARR_API_KEY, "Content-Type": "application/json"}
-        resp = requests.post(cmd_url, json=payload, headers=headers)
-        resp.raise_for_status()
+        try:
+            resp = requests.post(cmd_url, json=payload, headers=headers, timeout=10)
+            resp.raise_for_status()
+        except requests.exceptions.ReadTimeout:
+            print("  [WARN] Request timed out, but Radarr search was likely triggered asynchronously.")
         record_search(f"movie_{movie_id}", "MoviesSearch", item_type="movie", title=title)
         return True  # Action Taken
     except Exception as e:
@@ -833,7 +853,12 @@ def process_sonarr(series_data=None):
         _, rem = get_next_search_time(a.get("key", ""))
         fails = a.get("fail_count", 0)
         marker = "→" if i == 0 else " "
-        print(f"  {marker} #{i+1} [{a['label']}] {a['print_title']} | Fails: {fails} | Next: {'Ready' if rem == 0 else f'in {rem:.0f}m'}")
+        def fmt_m_s(m):
+            if m <= 0: return "Ready"
+            h = int(m // 60)
+            mins = int(m % 60)
+            return f"in {h}h{mins:02d}m" if h > 0 else f"in {mins}m"
+        print(f"  {marker} #{i+1} [{a['label']}] {a['print_title']} | Fails: {fails} | Next: {fmt_m_s(rem)}")
     print()
     
     # Execute Top Action
@@ -848,8 +873,11 @@ def process_sonarr(series_data=None):
                 "seriesId": top["series_id"],
                 "seasonNumber": top["season_num"]
             }
-            resp = requests.post(cmd_url, json=payload, headers=headers)
-            resp.raise_for_status()
+            try:
+                resp = requests.post(cmd_url, json=payload, headers=headers, timeout=10)
+                resp.raise_for_status()
+            except requests.exceptions.ReadTimeout:
+                print("  [WARN] Request timed out, but Sonarr search was likely triggered asynchronously.")
             print(f"Triggered SeasonSearch for {top['print_title']} - Mode: {top['label']}")
             record_search(f"season_{top['series_id']}_{top['season_num']}", f"{top['type']} ({top['label']})", item_type="season", title=top["title"])
             return True
@@ -859,8 +887,11 @@ def process_sonarr(series_data=None):
                 "name": "EpisodeSearch",
                 "episodeIds": [top["episode_id"]]
             }
-             resp = requests.post(cmd_url, json=payload, headers=headers)
-             resp.raise_for_status()
+             try:
+                 resp = requests.post(cmd_url, json=payload, headers=headers, timeout=10)
+                 resp.raise_for_status()
+             except requests.exceptions.ReadTimeout:
+                 print("  [WARN] Request timed out, but Sonarr search was likely triggered asynchronously.")
              print(f"Triggered EpisodeSearch for {top['print_title']} - Mode: {top['label']}")
              record_search(f"episode_{top['episode_id']}", f"{top['type']} ({top['label']})", item_type="episode", title=top["title"])
              return True

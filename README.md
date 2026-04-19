@@ -33,7 +33,7 @@ services:
     user: "1000:1000" # Run as your local user (recommend)
     environment:
       - JELLYSEER_API_KEY=your_api_key
-      - JELLYSEER_URL=http://your-jellyseerr:5055
+      - JELLYSEER_URL=http://your-Seerr:5055
       - TMDB_API_KEY=your_api_key
       - RADARR_API_KEY=your_api_key
       - RADARR_URL=http://your-radarr:7878
@@ -70,7 +70,7 @@ docker run -d \
   --name seerr-sentinel \
   --restart unless-stopped \
   -e JELLYSEER_API_KEY=your_api_key \
-  -e JELLYSEER_URL=http://your-jellyseerr:5055 \
+  -e JELLYSEER_URL=http://your-Seerr:5055 \
   -e TMDB_API_KEY=your_api_key \
   -e RADARR_API_KEY=your_api_key \
   -e RADARR_URL=http://your-radarr:7878 \
@@ -162,8 +162,8 @@ python3 seerr_sentinel.py import --sonarr --force-id 42
 
 | Variable | Required | Description |
 |---|---|---|
-| `JELLYSEER_API_KEY` | yes | Jellyseerr API key |
-| `JELLYSEER_URL` | yes | Jellyseerr URL (`http://your-jellyseerr:5055`) |
+| `JELLYSEER_API_KEY` | yes | Seerr API key |
+| `JELLYSEER_URL` | yes | Seerr URL (`http://your-Seerr:5055`) |
 | `TMDB_API_KEY` | yes | TMDB API key (register here [TMDB](https://www.themoviedb.org/settings/api))|
 | `RADARR_API_KEY` | yes | Radarr API key |
 | `RADARR_URL` | yes | Radarr URL (`http://your-radarr:7878`) |
@@ -172,7 +172,7 @@ python3 seerr_sentinel.py import --sonarr --force-id 42
 | `DOWNLOADS_PATH` | yes | Path to the downloads folder |
 | `RELEASE_BUFFER_DAYS` | optional | Days after release before cleanup (default: `7`) |
 | `DELETION_DELAY_DAYS` | optional | Grace period before deletion (default: `2`) |
-| `KEEP_REQUESTS_OLDER_THAN_DAYS` | optional | Keep Jellyseerr requests older than N days (default: `14`) |
+| `KEEP_REQUESTS_OLDER_THAN_DAYS` | optional | Keep Seerr requests older than N days (default: `14`) |
 | `STUCK_DOWNLOAD_MINUTES` | optional | Minutes to wait before removing a download with <= 5% progress (default: `20.0`) |
 | `MAX_DOWNLOAD_HOURS` | optional | Maximum hours before a download is removed regardless of progress (default: `6.0`) |
 | `DAEMON_INTERVAL_SECONDS` | optional | How often the background daemon checks the timers (default: `60`) |
@@ -206,8 +206,8 @@ When running the `all` command (or the `daemon` mode), the script manages its ow
 
 1. Fetches all missing media from Radarr/Sonarr
 2. Ignores recent releases (`RELEASE_BUFFER_DAYS`)
-3. After `DELETION_DELAY_DAYS` days → deletes from Radarr/Sonarr and Jellyseerr
-4. Keeps Jellyseerr requests older than `KEEP_REQUESTS_OLDER_THAN_DAYS` days
+3. After `DELETION_DELAY_DAYS` days → deletes from Radarr/Sonarr and Seerr
+4. Keeps Seerr requests older than `KEEP_REQUESTS_OLDER_THAN_DAYS` days
 5. Detects stuck downloads in Radarr/Sonarr queues (<= 5% progress after `STUCK_DOWNLOAD_MINUTES` or any progress after `MAX_DOWNLOAD_HOURS`) and blocklists them
 
 ### `sentinel_import` logic
