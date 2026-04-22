@@ -55,6 +55,7 @@ services:
       # - SEASON_MAX_SEARCHES=2
       # - EPISODE_CYCLE_HOURS=12
       # - EPISODE_MAX_SEARCHES=1
+      # - JELLYSEERR_DECLINE_MESSAGE="The media could not be found or downloaded within the allotted time. The request has been automatically cancelled."
     volumes:
       - /path/to/your/downloads:/downloads
 ```
@@ -185,6 +186,7 @@ python3 seerr_sentinel.py import --sonarr --force-id 42
 | `SEASON_MAX_SEARCHES` | optional | Max searches per cycle for a season (default: `2`) |
 | `EPISODE_CYCLE_HOURS` | optional | Duration of search cycle for individual episodes (default: `12`) |
 | `EPISODE_MAX_SEARCHES` | optional | Max searches per cycle for an episode (default: `1`) |
+| `JELLYSEERR_DECLINE_MESSAGE` | optional | Custom message sent to the user when their request is declined and deleted. Requires decline notifications to be configured in Jellyseerr. (default: `"The media could not be found or downloaded within the allotted time. The request has been automatically cancelled."`) |
 
 ## Architecture
 
@@ -206,9 +208,11 @@ When running the `all` command (or the `daemon` mode), the script manages its ow
 
 1. Fetches all missing media from Radarr/Sonarr
 2. Ignores recent releases (`RELEASE_BUFFER_DAYS`)
-3. After `DELETION_DELAY_DAYS` days → deletes from Radarr/Sonarr and Seerr
-4. Keeps Seerr requests older than `KEEP_REQUESTS_OLDER_THAN_DAYS` days
-5. Detects stuck downloads in Radarr/Sonarr queues (<= 5% progress after `STUCK_DOWNLOAD_MINUTES` or any progress after `MAX_DOWNLOAD_HOURS`) and blocklists them
+3. After `DELETION_DELAY_DAYS` days → deletes from Radarr/Sonarr
+4. **Declines** the Jellyseerr request and sends a notification to the requester (via the configured notification agents: Discord, Email, etc.)
+5. The declined request stays visible in Jellyseerr — the user can re-request with one click
+6. Keeps Seerr requests older than `KEEP_REQUESTS_OLDER_THAN_DAYS` days (no decline sent for those)
+7. Detects stuck downloads in Radarr/Sonarr queues (<= 5% progress after `STUCK_DOWNLOAD_MINUTES` or any progress after `MAX_DOWNLOAD_HOURS`) and blocklists them
 
 ### `sentinel_import` logic
 
