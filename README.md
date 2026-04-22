@@ -55,7 +55,6 @@ services:
       # - SEASON_MAX_SEARCHES=2
       # - EPISODE_CYCLE_HOURS=12
       # - EPISODE_MAX_SEARCHES=1
-      # - JELLYSEERR_DECLINE_MESSAGE="The media could not be found or downloaded within the allotted time. The request has been automatically cancelled."
     volumes:
       - /path/to/your/downloads:/downloads
 ```
@@ -186,7 +185,6 @@ python3 seerr_sentinel.py import --sonarr --force-id 42
 | `SEASON_MAX_SEARCHES` | optional | Max searches per cycle for a season (default: `2`) |
 | `EPISODE_CYCLE_HOURS` | optional | Duration of search cycle for individual episodes (default: `12`) |
 | `EPISODE_MAX_SEARCHES` | optional | Max searches per cycle for an episode (default: `1`) |
-| `JELLYSEERR_DECLINE_MESSAGE` | optional | Custom message sent to the user when their request is declined and deleted. Requires decline notifications to be configured in Jellyseerr. (default: `"The media could not be found or downloaded within the allotted time. The request has been automatically cancelled."`) |
 
 ## Architecture
 

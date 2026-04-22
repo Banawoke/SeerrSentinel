@@ -42,10 +42,6 @@ KEEP_REQUESTS_OLDER_THAN_DAYS = int(os.environ.get("KEEP_REQUESTS_OLDER_THAN_DAY
 STUCK_DOWNLOAD_MINUTES = float(os.environ.get("STUCK_DOWNLOAD_MINUTES", "20.0"))
 MAX_DOWNLOAD_HOURS = float(os.environ.get("MAX_DOWNLOAD_HOURS", "6.0"))
 DELETE_NOT_MANAGED = os.environ.get("DELETE_NOT_MANAGED_JELLYSEERR", "true").lower() in ("true", "1", "yes")
-JELLYSEERR_DECLINE_MESSAGE = os.environ.get(
-    "JELLYSEERR_DECLINE_MESSAGE",
-    "The media could not be found or downloaded within the allotted time. The request has been automatically cancelled.",
-)
 
 PENDING_FILE = "/tmp/jellyseerr_pending_deletions.json"
 
@@ -254,38 +250,33 @@ def fetch_jellyseerr_requests(api_key, base_url):
 
     return requests_list
 
-def decline_jellyseerr_request(api_key, base_url, request_id, title):
-    """Send a decline notification to the user for a given Jellyseerr request ID."""
-    if not request_id:
-        print(f"  [WARN] No request_id found for '{title}', skipping decline notification.")
-        return
-    headers = {"X-Api-Key": api_key, "Content-Type": "application/json"}
-    decline_url = f"{base_url}/api/v1/request/{request_id}/decline"
-    try:
-        response = requests.post(decline_url, headers=headers, json={"reason": JELLYSEERR_DECLINE_MESSAGE})
-        response.raise_for_status()
-        print(f"  [NOTIFY] Decline notification sent for '{title}' (request ID: {request_id}).")
-    except Exception as e:
-        print(f"  [WARN] Could not send decline notification for '{title}' (request ID: {request_id}): {e}")
-
-
 def decline_jellyseerr_requests(api_key, base_url, requests_to_decline):
-    """Decline Jellyseerr requests, notifying the requester without deleting the media entry.
-    The user can re-request the media from the 'Declined' status in Jellyseerr.
+    """Decline Jellyseerr requests via the API.
+    Jellyseerr automatically notifies the requester via its configured notification agents.
+    The declined request stays visible so the user can re-request with one click.
     """
     if not requests_to_decline:
         print("No Jellyseerr requests to decline.")
         return 0
 
+    headers = {"X-Api-Key": api_key}
     declined_count = 0
     for request in requests_to_decline:
         request_id = request.get("request_id")
         tmdb_id = request.get("tmdb_id")
         title = request.get("title") or (f"TMDB {tmdb_id}" if tmdb_id else "Unknown Jellyseerr Media")
         requester = request.get("requested_by", "Unknown")
-        print(f"Declining Jellyseerr request for '{title}' (request ID: {request_id}, requested by: {requester})")
-        decline_jellyseerr_request(api_key, base_url, request_id, title)
-        declined_count += 1
+        if not request_id:
+            print(f"  [WARN] No request_id for '{title}', skipping.")
+            continue
+        decline_url = f"{base_url}/api/v1/request/{request_id}/decline"
+        try:
+            resp = requests.post(decline_url, headers=headers)
+            resp.raise_for_status()
+            print(f"  [✓] Declined '{title}' (request ID: {request_id}, by: {requester})")
+            declined_count += 1
+        except Exception as e:
+            print(f"  [WARN] Could not decline '{title}' (request ID: {request_id}): {e}")
 
     print(f"Declined {declined_count} Jellyseerr request(s).")
     return declined_count
