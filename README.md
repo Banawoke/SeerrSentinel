@@ -216,5 +216,6 @@ When running the `all` command (or the `daemon` mode), the script manages its ow
 
 1. Scans the `DOWNLOADS_PATH` folder
 2. Matches files against missing media using title tokens + TMDB aliases
-3. Creates hard-links in Radarr/Sonarr media folders (ensure the container user has write access)
-4. Triggers a `RescanMovie` / `RescanSeries` and waits for confirmation
+3. Skip import if the content is downloading
+4. Creates hard-links in Radarr/Sonarr media folders (ensure the container user has write access)
+5. Triggers a `RescanMovie` / `RescanSeries` and waits for confirmation

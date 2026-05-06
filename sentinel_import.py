@@ -259,6 +259,37 @@ class MediaImporter:
     def run(self) -> None:
         raise NotImplementedError
 
+    def get_active_download_ids(self, url, api_key, id_field):
+        """
+        Returns a dict {media_id: [queue_title, ...]} for all items in the queue
+        that are actively downloading (status == 'downloading' or
+        trackedDownloadState in 'downloading'/'importPending').
+
+        id_field: 'seriesId' for Sonarr, 'movieId' for Radarr.
+
+        Using the actual media ID from queue records is far more reliable than
+        fuzzy title matching against disk filenames.
+        """
+        active = {}  # media_id -> list of queue titles
+        try:
+            resp = requests.get(
+                f"{url}/api/v3/queue",
+                params={"pageSize": 200},
+                headers={"X-Api-Key": api_key},
+            )
+            if resp.status_code != 200:
+                return active
+            for r in resp.json().get("records", []):
+                status = r.get("status", "").lower()
+                tracked_state = r.get("trackedDownloadState", "").lower()
+                if status == "downloading" or tracked_state in ("downloading", "importpending"):
+                    media_id = r.get(id_field)
+                    if media_id:
+                        active.setdefault(media_id, []).append(r.get("title", "?"))
+        except Exception as e:
+            print(f"  -> [WARN] Could not fetch active downloads from queue: {e}")
+        return active
+
     def wait_for_command(self, url, api_key, command_id, timeout=120):
         """Wait for a command to complete by polling its status."""
         start_time = time.time()
@@ -425,10 +456,22 @@ class RadarrImporter(MediaImporter):
         disk_items = self.get_downloads_content()
         video_files = [i["path"] for i in disk_items if i["type"] == "file" and i["name"].lower().endswith(('.mkv', '.mp4', '.avi'))]
 
+        # Fetch active downloads once (keyed by movieId) to block concurrent imports
+        active_downloading = self.get_active_download_ids(self.url, self.api_key, "movieId")
+        if active_downloading:
+            titles_str = ", ".join(str(k) for k in active_downloading)
+            print(f"  [INFO] {len(active_downloading)} movie(s) actively downloading (movieId: {titles_str}) — will be skipped.")
+
         processed_ids = set()
 
         for m in released_movies:
             if m['id'] in processed_ids: continue
+
+            # Skip if this exact movie is currently being downloaded
+            if m['id'] in active_downloading:
+                dl_titles = ", ".join(active_downloading[m['id']])
+                print(f"{m['title']} -> [SKIP] Actively downloading ({dl_titles}). Import deferred to next cycle.")
+                continue
 
             # Build Check List
             titles = {m["title"], m.get("originalTitle"), m.get("cleanTitle")}
@@ -484,7 +527,7 @@ class RadarrImporter(MediaImporter):
             if match:
                 print(f"{m['title']} (TMDB ID: {m['tmdbId']}) -> {match['path']}")
                 processed_ids.add(m['id'])
-                
+
                 dest_path = m['path']
                 if self.check_inode_match(match['path'], dest_path):
                     print("  -> Already linked (Inode). Skipping.")
@@ -768,7 +811,19 @@ class SonarrImporter(MediaImporter):
         disk_items = self.get_downloads_content()
         video_files = [i["path"] for i in disk_items if i["type"] == "file" and i["name"].lower().endswith(('.mkv', '.mp4', '.avi'))]
 
+        # Fetch active downloads once (keyed by seriesId) to block concurrent imports
+        active_downloading = self.get_active_download_ids(self.url, self.api_key, "seriesId")
+        if active_downloading:
+            titles_str = ", ".join(str(k) for k in active_downloading)
+            print(f"  [INFO] {len(active_downloading)} series actively downloading (seriesId: {titles_str}) — will be skipped.")
+
         for s in missing:
+            # Skip if this exact series is currently being downloaded
+            if s['id'] in active_downloading:
+                dl_titles = ", ".join(active_downloading[s['id']])
+                print(f"{s['title']} -> [SKIP] Actively downloading ({dl_titles}). Import deferred to next cycle.")
+                continue
+
             # Series/Episode level checks are not robust enough here right now, 
             # and TMDB caused false negatives. Removed TMDB skip for Sonarr.
 
