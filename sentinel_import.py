@@ -734,6 +734,12 @@ class SonarrImporter(MediaImporter):
                     e_num = int(match_nxn.group(2))
 
                 if e_num is None:
+                    # --- Standalone Exx format (e.g. "Tokyo.Revengers.E12.mkv" or "Show - E03.mkv") ---
+                    match_e = re.search(r'(?:^|[._\-\s\[])E(\d{1,3})(?:$|[._\-\s\]])', filename, re.IGNORECASE)
+                    if match_e:
+                        e_num = int(match_e.group(1))
+
+                if e_num is None:
                     # --- Composite number detection ---
                     # Filenames like "201 - titre.mkv" or "1012 - titre.mkv"
                     # where the number encodes season+episode (e.g. 2+01 or 10+12)
