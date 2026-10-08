@@ -735,11 +735,23 @@ def process_sonarr(series_data=None):
         mark_failed_if_previous_search(season_key, title=f"{series_title} Season {season_num}")
         mark_failed_if_previous_search(ep_key, title=ep_seq_title)
 
+        # Check if the entire season has been released
+        season_next_airing = season_stats.get("nextAiring")
+        aired_eps = season_stats.get("episodeCount", 0)
+        is_season_fully_released = (
+            total_in_season > 0
+            and aired_eps >= total_in_season
+            and not season_next_airing
+        )
+
         # PRIORITY DECISION:
-        # Use episodeFileCount == 0 as THE reliable signal that nothing exists on disk.
-        # totalEpisodeCount may include specials or future episodes and is unreliable.
-        # If there are ZERO files for this season, we want a Pack Search.
-        if file_count == 0 and total_in_season > 0:
+        # If the entire season has aired / is released, prioritize a global Pack Search
+        # (even if some files already exist on disk), because release groups package complete seasons.
+        # Only prioritize Individual Search if the season is still currently airing (not all episodes released).
+        if is_season_fully_released:
+            prefer_season = True
+            search_type_label = f"Pack Search (Season fully released — {missing_count} missing / {total_in_season} total)"
+        elif file_count == 0 and total_in_season > 0:
             prefer_season = True
             search_type_label = f"Pack Search (0 files — {missing_count} missing / {total_in_season} total)"
         elif total_in_season > 0 and missing_count >= total_in_season:
@@ -748,7 +760,7 @@ def process_sonarr(series_data=None):
             search_type_label = f"Pack Search ({missing_count}/{total_in_season} episodes)"
         else:
             prefer_season = False
-            search_type_label = f"Individual Search (S{season_num}E{ep_num})"
+            search_type_label = f"Individual Search (S{season_num}E{ep_num} — Season still airing)"
 
         files_unfiled = max(0, total_in_season - file_count)
         if files_unfiled != missing_count:

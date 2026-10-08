@@ -269,19 +269,84 @@ def get_all_radarr_movies_with_status(api_key, base_url):
     movies = response.json()
     return {movie.get("tmdbId"): movie for movie in movies if "tmdbId" in movie}
 
+def resolve_sonarr_series_tmdb_id(series, tmdb_api_key):
+    tmdb_id = series.get("tmdbId")
+    if tmdb_id and int(tmdb_id) > 0:
+        return int(tmdb_id)
+    tvdb_id = series.get("tvdbId")
+    if tvdb_id and tmdb_api_key:
+        try:
+            url = f"https://api.themoviedb.org/3/find/{tvdb_id}?api_key={tmdb_api_key}&external_source=tvdb_id"
+            resp = requests.get(url, timeout=10)
+            if resp.status_code == 200:
+                results = resp.json().get("tv_results", [])
+                if results and "id" in results[0]:
+                    resolved = int(results[0]["id"])
+                    print(f"  [RESOLVE] Series '{series.get('title')}' (TVDB {tvdb_id}) -> TMDB ID resolved to {resolved}")
+                    series["tmdbId"] = resolved
+                    return resolved
+        except Exception as e:
+            print(f"  [WARN] Failed to resolve TMDB ID for '{series.get('title')}' via TVDB ID {tvdb_id}: {e}")
+    return 0
+
 def get_all_sonarr_series_with_status(api_key, base_url):
     headers = {"X-Api-Key": api_key}
     url = f"{base_url}/api/v3/series"
     response = requests.get(url, headers=headers)
     response.raise_for_status()
     series_list = response.json()
-    return {series.get("tmdbId"): series for series in series_list if "tmdbId" in series}
+    result = {}
+    for series in series_list:
+        tmdb_id = resolve_sonarr_series_tmdb_id(series, TMDB_API_KEY)
+        key = tmdb_id if tmdb_id > 0 else f"sonarr_{series.get('id')}"
+        result[key] = series
+    return result
+
+def get_radarr_queue_active_movie_ids(api_key, base_url):
+    try:
+        headers = {"X-Api-Key": api_key}
+        url = f"{base_url}/api/v3/queue?pageSize=200"
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            records = response.json().get("records", [])
+            active_movies = set()
+            for r in records:
+                m_id = r.get("movieId")
+                status = r.get("status", "").lower()
+                if m_id is not None and status in ("downloading", "completed", "queued", "paused"):
+                    active_movies.add(m_id)
+            return active_movies
+    except Exception as e:
+        print(f"  [WARN] Failed to fetch Radarr queue for active downloads: {e}")
+    return set()
+
+def get_sonarr_queue_active_items(api_key, base_url):
+    try:
+        headers = {"X-Api-Key": api_key}
+        url = f"{base_url}/api/v3/queue?pageSize=200"
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            records = response.json().get("records", [])
+            active_seasons = set()
+            for r in records:
+                s_id = r.get("seriesId")
+                sn = r.get("seasonNumber")
+                status = r.get("status", "").lower()
+                if s_id is not None and sn is not None and status in ("downloading", "completed", "queued", "paused"):
+                    active_seasons.add((s_id, sn))
+            return active_seasons
+    except Exception as e:
+        print(f"  [WARN] Failed to fetch Sonarr queue for active downloads: {e}")
+    return set()
 
 def get_radarr_missing_movies(api_key, base_url):
     all_movies = get_all_radarr_movies_with_status(api_key, base_url)
+    active_movies = get_radarr_queue_active_movie_ids(api_key, base_url)
     missing_movies = {}
     for tmdb_id, movie in all_movies.items():
         if tmdb_id is None:
+            continue
+        if movie.get("id") in active_movies:
             continue
         has_file = movie.get("hasFile")
 
@@ -303,19 +368,17 @@ def get_radarr_missing_movies(api_key, base_url):
 
 def get_sonarr_missing_episodes(api_key, base_url):
     all_series = get_all_sonarr_series_with_status(api_key, base_url)
+    active_seasons = get_sonarr_queue_active_items(api_key, base_url)
     missing_items = {}
     for tmdb_id, series in all_series.items():
         if tmdb_id is None:
             continue
         
-        # Check series-level safeguards first
+        # Check series-level safeguards for future / recent airings
         next_air_date = get_sonarr_next_airing(series)
-        if not is_release_due(next_air_date, RELEASE_BUFFER_DAYS):
-            continue
-        
+        series_has_future_airing = not is_release_due(next_air_date, RELEASE_BUFFER_DAYS)
         previous_airing = series.get("previousAiring")
-        if previous_airing and not is_release_due(previous_airing, RELEASE_BUFFER_DAYS):
-            continue
+        series_recent_airing = bool(previous_airing and not is_release_due(previous_airing, RELEASE_BUFFER_DAYS))
 
         # Series-level ghost detection via sizeOnDisk
         series_stats = series.get("statistics", {})
@@ -330,7 +393,7 @@ def get_sonarr_missing_episodes(api_key, base_url):
         # Now check seasons
         seasons = series.get("seasons", [])
         monitored_seasons_count = 0
-        actionable_seasons = [] # Seasons with 0 files (to be unmonitored)
+        actionable_seasons = [] # Seasons with 0 files (or partial to be unmonitored)
         report_seasons = []     # All seasons with missing files (for logging)
         
         for season in seasons:
@@ -349,6 +412,11 @@ def get_sonarr_missing_episodes(api_key, base_url):
 
             monitored_seasons_count += 1
 
+            sn = season.get("seasonNumber")
+            if (series.get("id"), sn) in active_seasons:
+                print(f"  [QUEUE] Season {sn} of '{series.get('title')}' is currently downloading/queued, skipping.")
+                continue
+
             # Ghost detection: API says files exist but sizeOnDisk is 0
             if file_count > 0 and season_size == 0:
                 print(f"  [GHOST] Season {season.get('seasonNumber')}: {file_count} files but sizeOnDisk=0")
@@ -357,11 +425,24 @@ def get_sonarr_missing_episodes(api_key, base_url):
             # Effective total count for missing check
             effective_total = max(total_count, total_eps_all)
 
-            # Check if season is fully aired
+            # Check season-specific airings
+            season_next_airing = stats.get("nextAiring") or stats.get("nextAiringEpisode")
+            season_prev_airing = stats.get("previousAiring")
+            
+            season_has_future_airing = False
+            if season_next_airing and not is_release_due(season_next_airing, RELEASE_BUFFER_DAYS):
+                season_has_future_airing = True
+            if season_prev_airing and not is_release_due(season_prev_airing, RELEASE_BUFFER_DAYS):
+                season_has_future_airing = True
+
             series_status = series.get("status", "").lower()
             series_ended = series_status == "ended"
-            no_next_airing = not get_sonarr_next_airing(series)
-            season_fully_aired = (total_count >= total_eps_all and total_count > 0) or series_ended or (no_next_airing and total_count > 0)
+            
+            season_fully_aired = not season_has_future_airing and (
+                (total_count >= total_eps_all and total_count > 0)
+                or series_ended
+                or (total_count > 0 and not season_next_airing)
+            )
 
             # If ANY files are missing, we report it
             if file_count < effective_total and effective_total > 0:
@@ -403,22 +484,23 @@ def get_sonarr_missing_episodes(api_key, base_url):
         if not report_seasons:
             continue
             
-        title = series.get("title") or get_tmdb_title(tmdb_id, TMDB_API_KEY, media_type="tv")
+        real_tmdb = series.get("tmdbId") or tmdb_id
+        title = series.get("title") or (get_tmdb_title(real_tmdb, TMDB_API_KEY, media_type="tv") if isinstance(real_tmdb, int) and real_tmdb > 0 else f"Series {series.get('id')}")
         
         if not actionable_seasons:
             continue
 
         # Determine action based on ACTIONABLE seasons:
-        # Delete whole series if ALL relevant seasons are incomplete/actionable;
+        # Delete whole series if ALL relevant seasons are incomplete/actionable AND no future/recent airings;
         # otherwise unmonitor and delete files for ONLY the incomplete seasons.
-        if len(actionable_seasons) == monitored_seasons_count:
+        if len(actionable_seasons) == monitored_seasons_count and not series_has_future_airing and not series_recent_airing:
              action = "delete_series"
         else:
              action = "remove_seasons"
              
         missing_items[tmdb_id] = {
-            "title": title or f"TMDB {tmdb_id}",
-            "tmdb_id": tmdb_id,
+            "title": title or f"TMDB {real_tmdb}",
+            "tmdb_id": real_tmdb,
             "series_id": series.get("id"),
             "action": action,
             "seasons": actionable_seasons, # For action logic
@@ -505,35 +587,42 @@ def delete_sonarr_season_files(api_key, base_url, series_id, seasons_to_delete):
             
     print(f"Deleted {deleted_count} episode file(s) for season(s) {seasons_to_delete} of series ID {series_id}.")
 
-def delete_sonarr_series(api_key, base_url, tmdb_id):
+def delete_sonarr_series(api_key, base_url, tmdb_id, series_id=None):
     headers = {"X-Api-Key": api_key, "Content-Type": "application/json"}
-    # First, find the series in Sonarr by tmdbId
-    lookup_url = f"{base_url}/api/v3/series?tmdbId={tmdb_id}"
-    response = requests.get(lookup_url, headers={"X-Api-Key": api_key})
-    response.raise_for_status()
-    series_list = response.json()
+    target_series_id = series_id
+    if not target_series_id and tmdb_id:
+        # First, find the series in Sonarr by tmdbId
+        lookup_url = f"{base_url}/api/v3/series?tmdbId={tmdb_id}"
+        response = requests.get(lookup_url, headers={"X-Api-Key": api_key})
+        response.raise_for_status()
+        series_list = response.json()
 
-    if not series_list:
+        if not series_list:
+            print(f"Series with TMDB ID {tmdb_id} not found in Sonarr.")
+            return
+        target_tmdb = normalize_tmdb_id(tmdb_id)
+        matching_series = next(
+            (
+                series
+                for series in series_list
+                if normalize_tmdb_id(series.get("tmdbId")) == target_tmdb
+            ),
+            None,
+        )
+        if not matching_series:
+            print(
+                f"Series with TMDB ID {tmdb_id} was not among the lookup results for Sonarr; skipping."
+            )
+            return
+        target_series_id = matching_series["id"]
+
+    if not target_series_id:
         print(f"Series with TMDB ID {tmdb_id} not found in Sonarr.")
         return
-    target_tmdb = normalize_tmdb_id(tmdb_id)
-    matching_series = next(
-        (
-            series
-            for series in series_list
-            if normalize_tmdb_id(series.get("tmdbId")) == target_tmdb
-        ),
-        None,
-    )
-    if not matching_series:
-        print(
-            f"Series with TMDB ID {tmdb_id} was not among the lookup results for Sonarr; skipping."
-        )
-        return
-    series_id = matching_series["id"]
+
     delete_url = f"{base_url}/api/v3/series/editor"
     payload = {
-        "seriesIds": [series_id],
+        "seriesIds": [target_series_id],
         "moveFiles": True,
         "deleteFiles": True,
         "addImportListExclusion": True,
@@ -541,7 +630,7 @@ def delete_sonarr_series(api_key, base_url, tmdb_id):
 
     delete_response = requests.delete(delete_url, headers=headers, json=payload)
     delete_response.raise_for_status()
-    print(f"Successfully deleted series with TMDB ID {tmdb_id} from Sonarr.")
+    print(f"Successfully deleted series (ID {target_series_id}, TMDB {tmdb_id}) from Sonarr.")
 
 def clean_stuck_downloads(api_key, base_url, app_name, dry_run=False):
     headers = {"X-Api-Key": api_key}
@@ -558,6 +647,7 @@ def clean_stuck_downloads(api_key, base_url, app_name, dry_run=False):
     episodes_has_file = {}
     movies_has_file = {}
     
+    download_episodes = {}
     if app_name.lower() == "sonarr":
         series_ids = set(r.get("seriesId") for r in records if r.get("seriesId"))
         for s_id in series_ids:
@@ -568,6 +658,13 @@ def clean_stuck_downloads(api_key, base_url, app_name, dry_run=False):
                         episodes_has_file[ep["id"]] = ep.get("hasFile", False)
             except Exception:
                 pass
+        for r in records:
+            d_id = r.get("downloadId")
+            ep_ids = r.get("episodeIds", [])
+            if not ep_ids and "episodeId" in r:
+                ep_ids = [r["episodeId"]]
+            if d_id:
+                download_episodes.setdefault(d_id, []).extend(ep_ids)
     elif app_name.lower() == "radarr":
         movie_ids = set(r.get("movieId") for r in records if r.get("movieId"))
         for m_id in movie_ids:
@@ -603,14 +700,21 @@ def clean_stuck_downloads(api_key, base_url, app_name, dry_run=False):
             ep_ids = [r["episodeId"]]
 
         # Check if media is ALREADY in the library (hasFile=True)
+        # Note: Actively downloading items (status == "downloading" and progress < 0.99)
+        # must NEVER be cleared as stale, since they may be upgrades or season packs.
         already_imported = False
-        if app_name.lower() == "sonarr":
-            if ep_ids and all(episodes_has_file.get(eid, False) for eid in ep_ids):
-                already_imported = True
-        elif app_name.lower() == "radarr":
-            m_id = r.get("movieId")
-            if m_id and movies_has_file.get(m_id, False):
-                already_imported = True
+        is_actively_downloading = (r.get("status") == "downloading" and progress < 0.99)
+
+        if not is_actively_downloading:
+            if app_name.lower() == "sonarr":
+                d_id = r.get("downloadId")
+                all_torrent_eps = download_episodes.get(d_id, ep_ids) if d_id else ep_ids
+                if all_torrent_eps and all(episodes_has_file.get(eid, False) for eid in all_torrent_eps):
+                    already_imported = True
+            elif app_name.lower() == "radarr":
+                m_id = r.get("movieId")
+                if m_id and movies_has_file.get(m_id, False):
+                    already_imported = True
 
         reason = None
         should_blocklist = True
@@ -747,7 +851,7 @@ def perform_deletions_list(radarr_api_key, radarr_url, sonarr_api_key, sonarr_ur
                 tmdb_id = item["tmdb_id"]
                 action = item.get("action", "delete_series")
                 if action == "delete_series":
-                    delete_sonarr_series(sonarr_api_key, sonarr_url, tmdb_id)
+                    delete_sonarr_series(sonarr_api_key, sonarr_url, tmdb_id, series_id=item.get("series_id"))
                 elif action == "remove_seasons":
                     series_id = item.get("series_id")
                     seasons = item.get("seasons", [])
@@ -907,17 +1011,22 @@ def generate_missing_media_report(dry_run=False):
         # Determine media type for lookup
         if tmdb_id in radarr_missing:
             media_type = "movie"
+            candidate_tmdb = tmdb_id
         else:
             media_type = "tv"
+            item_info = sonarr_missing.get(tmdb_id)
+            candidate_tmdb = item_info.get("tmdb_id") if isinstance(item_info, dict) else tmdb_id
 
-        # Lookup media in Jellyseerr directly
-        try:
-             jellyseerr_data = get_jellyseerr_media_info(JELLYSEER_API_KEY, JELLYSEER_URL, tmdb_id, media_type)
-        except Exception as e:
-             print(f"Error looking up TMDB ID {tmdb_id} in Jellyseerr: {e}")
-             continue
-             
-        media_info = jellyseerr_data.get("mediaInfo")
+        # Lookup media in Jellyseerr directly if valid TMDB ID
+        jellyseerr_data = None
+        if isinstance(candidate_tmdb, int) and candidate_tmdb > 0:
+            try:
+                jellyseerr_data = get_jellyseerr_media_info(JELLYSEER_API_KEY, JELLYSEER_URL, candidate_tmdb, media_type)
+            except Exception as e:
+                print(f"Error looking up TMDB ID {candidate_tmdb} in Jellyseerr: {e}")
+                jellyseerr_data = None
+
+        media_info = jellyseerr_data.get("mediaInfo") if jellyseerr_data else None
         if not media_info:
             if DELETE_NOT_MANAGED:
                 # Resolve title for display
@@ -926,14 +1035,14 @@ def generate_missing_media_report(dry_run=False):
                     ready_radarr.append(tmdb_id)
                     ready_radarr_count += 1
                 elif tmdb_id in sonarr_missing:
-                    title_nm = sonarr_missing[tmdb_id].get("title", f"TMDB {tmdb_id}")
+                    title_nm = sonarr_missing[tmdb_id].get("title", f"TMDB {candidate_tmdb}")
                     ready_sonarr.append(sonarr_missing[tmdb_id])
                     ready_sonarr_count += 1
                 else:
-                    title_nm = f"TMDB {tmdb_id}"
+                    title_nm = f"TMDB {candidate_tmdb}"
                 print(f"  🗑 {title_nm} | Not in Jellyseerr → will be deleted")
             else:
-                print(f"  NOT IN JELLYSEERR TMDB {tmdb_id} — Not managed by Jellyseerr")
+                print(f"  NOT IN JELLYSEERR TMDB {candidate_tmdb} — Not managed by Jellyseerr")
             continue
             
         requests_list = media_info.get("requests", [])
@@ -955,19 +1064,19 @@ def generate_missing_media_report(dry_run=False):
             requester = "Media-Only (No Request)"
         
         media_id = media_info.get("id")
-        title = jellyseerr_data.get("title") or jellyseerr_data.get("name") or f"TMDB {tmdb_id}"
+        title = jellyseerr_data.get("title") or jellyseerr_data.get("name") or f"TMDB {candidate_tmdb}"
 
         request_date = parse_iso_datetime(request_date_str)
         
         # Entry for pending file (store based on latest request)
-        tmdb_id_str = str(tmdb_id)
+        tmdb_id_str = str(candidate_tmdb)
         
         # Preserve first_seen from existing pending data for rollback tracking
         prev_entry = existing_pending.get(tmdb_id_str, {})
         first_seen_str = prev_entry.get("first_seen", now.isoformat())
         
         entry = {
-            "tmdb_id": tmdb_id,
+            "tmdb_id": candidate_tmdb,
             "title": title,
             "request_date": request_date_str,
             "requested_by": requester,

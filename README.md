@@ -166,7 +166,7 @@ python3 seerr_sentinel.py import --sonarr --force-id 42
 |---|---|---|
 | `JELLYSEER_API_KEY` | yes | Seerr API key |
 | `JELLYSEER_URL` | yes | Seerr URL (`http://your-Seerr:5055`) |
-| `TMDB_API_KEY` | yes | TMDB API key (register here [TMDB](https://www.themoviedb.org/settings/api))|
+| `TMDB_API_KEY` | yes | TMDB API key (register here [TMDB](https://www.themoviedb.org/settings/api)). Used for metadata, movie titles, and dynamic TVDB -> TMDB resolution when Sonarr series lack a TMDB ID |
 | `RADARR_API_KEY` | yes | Radarr API key |
 | `RADARR_URL` | yes | Radarr URL (`http://your-radarr:7878`) |
 | `SONARR_API_KEY` | yes | Sonarr API key |
@@ -203,21 +203,30 @@ When running the `all` command (or the `daemon` mode), the script manages its ow
 
 1. Checks for active commands (global lock)
 2. Looks for missing Radarr candidates → triggers `MoviesSearch`
-3. Looks at Sonarr missing episodes → determines Pack Search vs. Individual Search
+3. **Smart Pack vs. Episode Decision**:
+   - **Fully Aired / Completed Seasons**: Prioritizes a global **Pack Search** (`SeasonSearch`), even if some files already exist on disk. This ensures tracker compatibility when indexers only distribute complete season packs.
+   - **Currently Airing Seasons**: Uses **Individual Search** (`EpisodeSearch`) episode by episode to grab new releases as they air weekly.
+   - **Fallback**: If a Pack Search previously failed, falls back to targeted individual episode searches.
 4. **Standard Search Triggers**: Triggers standard `SeasonSearch` or `EpisodeSearch` commands on Sonarr
 5. Per-cycle quota (12h) to avoid flooding indexers
+
+> [!TIP]
+> **Sonarr Quality Profile Recommendation (`Upgrades Allowed`)**:
+> Make sure your Quality Profiles in Sonarr have **`Upgrades Allowed`** enabled (with an appropriate cutoff like *WEB 1080p*). If upgrades are disabled and Sonarr already holds 1 or 2 partial episodes with matching quality, Sonarr will reject incoming season packs (*"Existing file meets cutoff"*). Enabling upgrades allows Sonarr to replace existing partial files with complete season packs automatically.
 
 ### `sentinel_cleaner` logic
 
 1. Fetches all missing media from Radarr/Sonarr
-2. Ignores recent releases (`RELEASE_BUFFER_DAYS`)
-3. After `DELETION_DELAY_DAYS` days → deletes from Radarr/Sonarr
-4. **Declines** the Jellyseerr request and sends a notification to the requester (via configured notification agents)
-5. The declined request stays visible in Jellyseerr — the user can re-request with one click
-6. Keeps Seerr requests older than `KEEP_REQUESTS_OLDER_THAN_DAYS` days (no decline sent for those)
-7. **Smart Queue Cleanup**: For downloads lingering in the queue whose media is **already imported in the library** (`hasFile=True`), clears the stale queue entry without blocklisting (`blocklist=false`) to keep Sonarr/Radarr in sync
-8. **Automated Queue Blocklisting**: For truly stuck downloads (<= 5% progress after `STUCK_DOWNLOAD_MINUTES` or > `MAX_DOWNLOAD_HOURS`) or unimportable/corrupt releases with missing files, automatically removes & blocklists them (`removeFromClient=true`, `blocklist=true`) so indexers can try other releases
-9. **Partial Series Cleanup**: Detects series with partially missing episodes in fully aired seasons (`PARTIAL_CLEANUP_ENABLED`). Removes the incomplete season files from disk (`remove_seasons`) and unmonitors them while preserving other complete seasons.
+2. **TVDB to TMDB Resolution**: If a Sonarr series reports `tmdbId: 0` (e.g. series indexed by TVDB ID only), resolves the genuine TMDB ID via TMDB's `/find` API before querying Jellyseerr, preventing lookup failures.
+3. **Queue-Aware Safeguard**: Actively downloading or queued items in Sonarr/Radarr are protected and will never be marked as missing or queued for deletion.
+4. Ignores recent releases (`RELEASE_BUFFER_DAYS`) and upcoming announced air dates.
+5. After `DELETION_DELAY_DAYS` days → deletes from Radarr/Sonarr
+6. **Declines** the Jellyseerr request and sends a notification to the requester (via configured notification agents)
+7. The declined request stays visible in Jellyseerr — the user can re-request with one click
+8. Keeps Seerr requests older than `KEEP_REQUESTS_OLDER_THAN_DAYS` days (no decline sent for those)
+9. **Smart Queue Cleanup**: For downloads lingering in the queue whose media is **already imported in the library** (`hasFile=True`), clears the stale queue entry without blocklisting (`blocklist=false`). Active in-progress downloads (`progress < 0.99`) are strictly preserved.
+10. **Automated Queue Blocklisting**: For truly stuck downloads (<= 5% progress after `STUCK_DOWNLOAD_MINUTES` or > `MAX_DOWNLOAD_HOURS`) or unimportable/corrupt releases with missing files, automatically removes & blocklists them (`removeFromClient=true`, `blocklist=true`) so indexers can try other releases
+11. **Partial Series Cleanup**: Detects series with partially missing episodes in fully aired seasons (`PARTIAL_CLEANUP_ENABLED`) — ideal when external scripts delete watched episodes one by one. Removes remaining incomplete season files from disk (`remove_seasons`) and unmonitors them while preserving other complete seasons and future announced seasons.
 
 ### `sentinel_import` logic
 
